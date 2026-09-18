@@ -12,5 +12,10 @@
       "database_name": "guildcore-v6",
       "database_id": "63ac1865-8993-40db-96ec-dd8c8641245d"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  }
 }
