@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "guildcore-v6",
   "main": "worker.js",
-  "compatibility_date": "2026-09-19",
+  "compatibility_date": "2026-09-18",
   "observability": {
     "enabled": true
   },
