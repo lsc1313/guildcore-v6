@@ -477,11 +477,11 @@ async function reorderCategoryChannels(env,guildId,parentId,orderedChannels){
   const items=(orderedChannels||[]).filter(Boolean);
   if(!items.length)return;
 
+  // 같은 카테고리 안에서 순서만 바꾸는 요청.
+  // Discord는 한 번의 bulk position PATCH에서 여러 channel의 parent_id 변경을 허용하지 않는다.
   const payload=items.map((c,i)=>({
     id:String(c.id),
-    position:i,
-    parent_id:String(parentId),
-    lock_permissions:false
+    position:i
   }));
 
   const r=await fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`,{
