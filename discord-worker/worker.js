@@ -473,28 +473,6 @@ async function ensureNamedChannel(env,guildId,channels,{name,type=0,parent_id=nu
 }
 
 
-async function reorderCategoryChannels(env,guildId,parentId,orderedChannels){
-  const items=(orderedChannels||[]).filter(Boolean);
-  if(!items.length)return;
-
-  // 같은 카테고리 안에서 순서만 바꾸는 요청.
-  // Discord는 한 번의 bulk position PATCH에서 여러 channel의 parent_id 변경을 허용하지 않는다.
-  const payload=items.map((c,i)=>({
-    id:String(c.id),
-    position:i
-  }));
-
-  const r=await fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`,{
-    method:"PATCH",
-    headers:botHeaders(env),
-    body:JSON.stringify(payload)
-  });
-  if(!r.ok){
-    const detail=await r.text();
-    throw new Error(`Discord 채널 순서 정렬 실패 (${r.status}). ${detail.slice(0,180)}`);
-  }
-}
-
 async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=false}={}){
   if(!config?.alliance_name)throw new Error("GuildCore 연합 설정을 불러오지 못했습니다.");
   const botMember=await getBotGuildMember(env,discordGuildId);
@@ -541,17 +519,10 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
   const allianceRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(allianceMember.id,gcReadBits())];
   const allianceVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(allianceMember.id,gcVoiceBits())];
 
-  const allianceNotice=await ensureNamedChannel(env,discordGuildId,channels,{name:"📢공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"📢공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
   const participation=await ensureNamedChannel(env,discordGuildId,channels,{name:"✅참여체크",type:0,parent_id:allianceCategory.id,topic:"연합 쟁/행사 참여조사",permission_overwrites:allianceCommon});
-  const allianceChat=await ensureNamedChannel(env,discordGuildId,channels,{name:"💬일반채팅",type:0,parent_id:allianceCategory.id,topic:"연합 일반 채팅",permission_overwrites:allianceCommon});
-  const allianceVoiceChannel=await ensureNamedChannel(env,discordGuildId,channels,{name:"🔊음성채팅",type:2,parent_id:allianceCategory.id,permission_overwrites:allianceVoice});
-
-  await reorderCategoryChannels(env,discordGuildId,allianceCategory.id,[
-    allianceNotice,
-    participation,
-    allianceChat,
-    allianceVoiceChannel
-  ]);
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"💬일반채팅",type:0,parent_id:allianceCategory.id,topic:"연합 일반 채팅",permission_overwrites:allianceCommon});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"🔊음성채팅",type:2,parent_id:allianceCategory.id,permission_overwrites:allianceVoice});
 
   // 서버별 보스채널 + 길드별 공지/음성
   const createdServers=[];
@@ -584,7 +555,6 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
 
     const alert=await ensureNamedChannel(env,discordGuildId,channels,{name:"🔔보스알림",type:0,parent_id:serverCategory.id,topic:`${serverName} 서버보스/월드보스 알림`,permission_overwrites:serverRead});
     const attendance=await ensureNamedChannel(env,discordGuildId,channels,{name:"⚔️보스참여",type:0,parent_id:serverCategory.id,topic:`${serverName} 보스 참여체크`,permission_overwrites:serverUse});
-    const desiredServerOrder=[alert,attendance];
 
     if(channelMap.get(`alert:SERVER:${serverId}`)!==String(alert.id)){
       await apiCall(env,discordGuildId,"discord_channel_set",{kind:"alert",scope:"SERVER",server_id:serverId,channel_id:alert.id});
@@ -597,12 +567,9 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
       const gr=guildRoleMap.get(String(g.guild_id));if(!gr)continue;
       const gRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(gr.id,gcReadBits())];
       const gVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(gr.id,gcVoiceBits())];
-      const guildNotice=await ensureNamedChannel(env,discordGuildId,channels,{name:`📌${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
-      const guildVoice=await ensureNamedChannel(env,discordGuildId,channels,{name:`🔊${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
-      desiredServerOrder.push(guildNotice,guildVoice);
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`📌${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`🔊${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
     }
-
-    await reorderCategoryChannels(env,discordGuildId,serverCategory.id,desiredServerOrder);
 
     createdServers.push({server_id:serverId,server_name:serverName,alert_channel_id:alert.id,attendance_channel_id:attendance.id,guild_count:serverGuilds.length});
   }
@@ -904,7 +871,7 @@ async function handleCommandAsync(interaction, env) {
   if (name === "동기화") {
     requireManager(interaction);
     const r=await syncCurrentDiscordServer(env,discordGuildId);
-    return {content:`✅ GuildCore 동기화 완료\n서버 ${r.server_count}개 · 길드 ${r.guild_count}개\n채널 순서 자동정렬 완료`};
+    return {content:`✅ GuildCore 동기화 완료\n서버 ${r.server_count}개 · 길드 ${r.guild_count}개`};
   }
   if (name === "참여체크생성") {
     const title=String(getOption(interaction,"제목")||"").trim();
