@@ -1,1 +1,14 @@
-
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "guildcore-discord",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-18",
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  }
+}

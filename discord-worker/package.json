@@ -1,1 +1,11 @@
-
+{
+  "name": "guildcore-discord",
+  "version": "3.10.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.68.0"
+  }
+}
