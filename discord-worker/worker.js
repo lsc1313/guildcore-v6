@@ -82,6 +82,7 @@ function commands() {
     { name:"출석채널설정", type:1, description:"현재 채널을 보스 컷/출석 채널로 설정합니다.", options:[{name:"범위",description:"전체/월드/특정 서버",type:3,required:false,choices:scopeChoices},{name:"서버",description:"범위가 서버일 때 선택",type:3,required:false,autocomplete:true}] },
     { name:"보스알림테스트", type:1, description:"설정된 보스알림 채널로 테스트 메시지를 보냅니다.", options:[{name:"범위",description:"전체/월드/특정 서버",type:3,required:false,choices:scopeChoices},{name:"서버",description:"범위가 서버일 때 선택",type:3,required:false,autocomplete:true}] },
     { name:"등록", type:1, description:"길드를 선택하고 게임 닉네임을 등록하거나 다시 등록합니다." },
+    { name:"웹핀", type:1, description:"웹 로그인용 10분·1회용 셀프 PIN을 발급합니다." },
     { name:"보스확인", type:1, description:"월드보스와 내 서버 보스의 컷/예정 시간을 확인합니다." },
     { name:"컷", type:1, description:"보스 컷을 등록합니다. 시각 생략 시 지금 컷입니다.", options:[{name:"보스",description:"컷한 보스",type:3,required:true,autocomplete:true},{name:"시각",description:"지난 컷이면 HH:MM",type:3,required:false}] },
     { name:"젠", type:1, description:"다음 젠 시각을 지정하거나 제거합니다.", options:[{name:"보스",description:"보스",type:3,required:true,autocomplete:true},{name:"시각",description:"HH:MM · 생략하면 제거",type:3,required:false}] },
@@ -949,7 +950,7 @@ function discordHelpContent() {
     "📌 **GuildCore Discord 명령어**",
     "",
     "**기본/보스**",
-    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/보스확인` · `/컷` · `/젠` · `/내출석`",
+    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석`",
     "`/출석종료` · `/참여삭제`",
     "",
     "**보스 설정 · 연합운영진+**",
@@ -1103,6 +1104,7 @@ async function handleCommandAsync(interaction, env) {
     return {content:`✅ **${title}** 참여체크를 <#${target}> 에 생성했습니다.`};
   }
   if (name === "등록") return await beginRegistration(interaction, env);
+  if (name === "웹핀") {const r=await apiCall(env,discordGuildId,"web_pin_self",actor);return {content:`🔐 **웹 로그인 PIN: ${r.pin}**\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
 
   if (name === "보스알림채널설정" || name === "출석채널설정") {
     await requireManager(interaction, env);
@@ -1506,7 +1508,7 @@ export default {
     }
 
     if (interaction.type === 2) {
-      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
+      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","웹핀","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
       const ephemeral = ephemeralNames.has(interaction.data?.name);
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleCommandAsync(interaction, env)); }
