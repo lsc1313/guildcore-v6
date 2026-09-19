@@ -310,7 +310,7 @@ async function syncD1MemberRoles(env,discordGuildId,{force=false,roles=null}={})
 
   const guildRoleNames=[...new Set((data.managed_guild_role_names||[]).map(String).filter(Boolean))];
   for(const name of guildRoleNames){
-    const role=await ensureDiscordRole(env,discordGuildId,roles,name);
+    const role=await ensureSystemRole(env,discordGuildId,roles,name,GC_MEMBER_PERMISSIONS);
     roleByName.set(name,role);
   }
 
@@ -443,8 +443,12 @@ function systemRolePermissions(name){
   if(name==="연합장")return GC_OWNER_PERMISSIONS;
   if(name==="연합운영진")return GC_MANAGER_PERMISSIONS;
   if(name==="연합원")return GC_MEMBER_PERMISSIONS;
-  // 길드 직책 역할 자체에는 서버 전체 권한을 주지 않는다.
-  // 실제 권한은 V6 D1의 guild_id + role로 판정한다.
+
+  // 길드장/부길드장/길드운영진도 Discord 기본 사용 권한은 가진다.
+  // 단, 채널관리/역할관리 같은 서버 전체 관리권한은 주지 않는다.
+  // 실제 GuildCore 운영범위는 V6 D1의 guild_id + role로 판정한다.
+  if(GC_GUILD_POSITION_ROLE_NAMES.includes(name))return GC_MEMBER_PERMISSIONS;
+
   return "0";
 }
 
@@ -551,7 +555,8 @@ async function getBotGuildMember(env, guildId) {
 
 
 function gcTextUseBits(){return permBits(DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.SEND_MESSAGES,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.USE_APPLICATION_COMMANDS,DISCORD_PERMS.ADD_REACTIONS);}
-function gcReadBits(){return permBits(DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.USE_APPLICATION_COMMANDS);}
+function gcReadBits(){return permBits(DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.USE_APPLICATION_COMMANDS,DISCORD_PERMS.ADD_REACTIONS);}
+function gcReadDenyBits(){return String(DISCORD_PERMS.SEND_MESSAGES);}
 function gcVoiceBits(){return (DISCORD_PERMS.VIEW_CHANNEL|GC_CONNECT|GC_SPEAK).toString();}
 function gcBotBits(){return permBits(DISCORD_PERMS.MANAGE_CHANNELS,DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.SEND_MESSAGES,DISCORD_PERMS.EMBED_LINKS,DISCORD_PERMS.ATTACH_FILES,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.ADD_REACTIONS,GC_CONNECT,GC_SPEAK);}
 function gcDenyView(){return String(DISCORD_PERMS.VIEW_CHANNEL);}
@@ -644,16 +649,17 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
     env,discordGuildId,roles,"연합원",GC_MEMBER_PERMISSIONS
   );
 
-  await ensureSystemRole(env,discordGuildId,roles,"길드장","0");
-  await ensureSystemRole(env,discordGuildId,roles,"부길드장","0");
-  await ensureSystemRole(env,discordGuildId,roles,"길드운영진","0");
+  await ensureSystemRole(env,discordGuildId,roles,"길드장",GC_MEMBER_PERMISSIONS);
+  await ensureSystemRole(env,discordGuildId,roles,"부길드장",GC_MEMBER_PERMISSIONS);
+  await ensureSystemRole(env,discordGuildId,roles,"길드운영진",GC_MEMBER_PERMISSIONS);
 
   const guildRoleMap=new Map();
   for(const g of (config.guilds||[])){
     const roleName=String(g.discord_role_name||g.guild_name||"").trim();
     if(!roleName)continue;
-    // 길드 역할은 소속/채널 접근용. 서버 전체 관리 권한은 부여하지 않는다.
-    const role=await ensureDiscordRole(env,discordGuildId,roles,roleName);
+    // 길드 역할은 소속/채널 접근용 + 기본 Discord 사용 권한.
+    // 서버 전체 관리 권한은 부여하지 않는다.
+    const role=await ensureSystemRole(env,discordGuildId,roles,roleName,GC_MEMBER_PERMISSIONS);
     guildRoleMap.set(String(g.guild_id),role);
   }
 
@@ -680,7 +686,7 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
   const allianceCategory=await ensureNamedCategory(env,discordGuildId,channels,String(config.alliance_name),allianceOverwrites);
 
   const allianceCommon=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffText,roleOverwrite(allianceMember.id,gcTextUseBits())];
-  const allianceRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(allianceMember.id,gcReadBits())];
+  const allianceRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(allianceMember.id,gcReadBits(),gcReadDenyBits())];
   const allianceVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(allianceMember.id,gcVoiceBits())];
 
   await ensureNamedChannel(env,discordGuildId,channels,{name:"📢공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
@@ -714,7 +720,7 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
     ];
     const serverCategory=await ensureNamedCategory(env,discordGuildId,channels,serverName,serverOverwrites);
 
-    const serverRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,...serverRoles.map(r=>roleOverwrite(r.id,gcReadBits()))];
+    const serverRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,...serverRoles.map(r=>roleOverwrite(r.id,gcReadBits(),gcReadDenyBits()))];
     const serverUse=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffText,...serverRoles.map(r=>roleOverwrite(r.id,gcTextUseBits()))];
 
     const alert=await ensureNamedChannel(env,discordGuildId,channels,{name:"🔔보스알림",type:0,parent_id:serverCategory.id,topic:`${serverName} 서버보스/월드보스 알림`,permission_overwrites:serverRead});
@@ -729,7 +735,7 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
 
     for(const g of serverGuilds){
       const gr=guildRoleMap.get(String(g.guild_id));if(!gr)continue;
-      const gRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(gr.id,gcReadBits())];
+      const gRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(gr.id,gcReadBits(),gcReadDenyBits())];
       const gVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(gr.id,gcVoiceBits())];
       await ensureNamedChannel(env,discordGuildId,channels,{name:`📌${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
       await ensureNamedChannel(env,discordGuildId,channels,{name:`🔊${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
@@ -831,8 +837,12 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
   const selectedRole = await ensureDiscordRole(
     env,discordGuildId,roles,data.discord_role_name||data.guild_name,data.discord_role_id||""
   );
+  // 기존 role_id를 우선 재사용한 뒤 권한을 기본값으로 맞춘다.
+  const selectedRoleSynced = await ensureSystemRole(
+    env,discordGuildId,roles,selectedRole.name,GC_MEMBER_PERMISSIONS
+  );
   const positionRole = positionRoleName
-    ? await ensureSystemRole(env,discordGuildId,roles,positionRoleName,"0")
+    ? await ensureSystemRole(env,discordGuildId,roles,positionRoleName,GC_MEMBER_PERMISSIONS)
     : null;
 
   const managedNames=new Set([
@@ -842,7 +852,7 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
   ]);
   const desiredIds=new Set([
     String(allianceRole.id),
-    String(selectedRole.id),
+    String(selectedRoleSynced.id),
     ...(positionRole?[String(positionRole.id)]:[])
   ]);
 
@@ -860,10 +870,10 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
   }
 
   await addRole(env, discordGuildId, userId, allianceRole.id);
-  await addRole(env, discordGuildId, userId, selectedRole.id);
+  await addRole(env, discordGuildId, userId, selectedRoleSynced.id);
   if(positionRole)await addRole(env,discordGuildId,userId,positionRole.id);
 
-  const requiredRoles=[allianceRole,selectedRole,...(positionRole?[positionRole]:[])];
+  const requiredRoles=[allianceRole,selectedRoleSynced,...(positionRole?[positionRole]:[])];
   const roleCheck = await verifyAssignedRoles(env, discordGuildId, userId, requiredRoles);
   if (!roleCheck.ok) {
     const names = roleCheck.missing.map(r => r.name).join(", ");
@@ -880,7 +890,7 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
   let content =
     `✅ ${data.reregistered ? "재등록" : "등록"} 완료\n` +
     `길드: ${data.guild_name}\n` +
-    `Discord 역할: ${[allianceRole.name,selectedRole.name,positionRole?.name].filter(Boolean).join(", ")}\n` +
+    `Discord 역할: ${[allianceRole.name,selectedRoleSynced.name,positionRole?.name].filter(Boolean).join(", ")}\n` +
     `길드 직책: ${data.guild_role||"길드원"}\n` +
     `닉네임: ${data.discord_display_name}`;
 
