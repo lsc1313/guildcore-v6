@@ -407,21 +407,59 @@ function gcDenyView(){return String(DISCORD_PERMS.VIEW_CHANNEL);}
 function roleOverwrite(roleId,allow,deny="0"){return {id:String(roleId),type:0,allow:String(allow),deny:String(deny)};}
 function memberOverwrite(userId,allow,deny="0"){return {id:String(userId),type:1,allow:String(allow),deny:String(deny)};}
 
+
+function normalizeManagedName(name){
+  return String(name||"").replace(/^[^0-9A-Za-z가-힣]+/,"").trim();
+}
+
+async function deleteDiscordChannel(env, channelId){
+  const r=await fetch(`https://discord.com/api/v10/channels/${channelId}`,{
+    method:"DELETE",
+    headers:botHeaders(env,false)
+  });
+  if(!r.ok && r.status!==404){
+    throw new Error(`Discord 채널 삭제 실패 ${r.status}: ${await r.text()}`);
+  }
+}
+
+async function cleanupEmptyDefaultServer(env,discordGuildId,channels,serverName,serverGuilds){
+  if(String(serverName)!=="기본서버" || (serverGuilds||[]).length) return false;
+  const category=channels.find(c=>Number(c.type)===4 && String(c.name)===String(serverName));
+  if(!category) return false;
+
+  const children=channels.filter(c=>String(c.parent_id||"")===String(category.id));
+  const allowed=new Set(["보스알림","보스참여"]);
+  const safe=children.every(c=>allowed.has(normalizeManagedName(c.name)));
+  if(!safe) return false;
+
+  for(const c of children){
+    await deleteDiscordChannel(env,c.id);
+  }
+  await deleteDiscordChannel(env,category.id);
+
+  for(let i=channels.length-1;i>=0;i--){
+    if(String(channels[i].id)===String(category.id) || children.some(c=>String(c.id)===String(channels[i].id))){
+      channels.splice(i,1);
+    }
+  }
+  return true;
+}
+
 async function ensureNamedCategory(env,guildId,channels,name,overwrites=[]){
-  let c=channels.find(x=>Number(x.type)===4&&String(x.name)===String(name));
+  let c=channels.find(x=>Number(x.type)===4&&normalizeManagedName(x.name)===normalizeManagedName(name));
   if(!c){
     c=await createDiscordChannel(env,guildId,{name,type:4,permission_overwrites:overwrites});
     channels.push(c);
   }else{
-    c=await patchDiscordChannel(env,c.id,{permission_overwrites:overwrites});
+    c=await patchDiscordChannel(env,c.id,{name,permission_overwrites:overwrites});
     const i=channels.findIndex(x=>String(x.id)===String(c.id));if(i>=0)channels[i]=c;
   }
   return c;
 }
 
 async function ensureNamedChannel(env,guildId,channels,{name,type=0,parent_id=null,topic="",permission_overwrites=[]}){
-  let c=channels.find(x=>Number(x.type)===Number(type)&&String(x.name)===String(name)&&String(x.parent_id||"")===String(parent_id||""));
-  const payload={permission_overwrites};
+  let c=channels.find(x=>Number(x.type)===Number(type)&&normalizeManagedName(x.name)===normalizeManagedName(name)&&String(x.parent_id||"")===String(parent_id||""));
+  const payload={name,permission_overwrites};
   if(parent_id)payload.parent_id=parent_id;
   if(type===0)payload.topic=topic||"";
   if(!c){
@@ -462,7 +500,7 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
 
   // 등록은 카테고리 밖: 미등록 사용자도 접근
   const registerChannel=await ensureNamedChannel(env,discordGuildId,channels,{
-    name:"등록",type:0,topic:"GuildCore 길드원 등록 · /등록",
+    name:"🚪등록",type:0,topic:"GuildCore 길드원 등록 · /등록",
     permission_overwrites:[roleOverwrite(everyoneId,gcTextUseBits()),botAccess]
   });
 
@@ -480,17 +518,26 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
   const allianceRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(allianceMember.id,gcReadBits())];
   const allianceVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(allianceMember.id,gcVoiceBits())];
 
-  await ensureNamedChannel(env,discordGuildId,channels,{name:"공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
-  const participation=await ensureNamedChannel(env,discordGuildId,channels,{name:"참여체크",type:0,parent_id:allianceCategory.id,topic:"연합 쟁/행사 참여조사",permission_overwrites:allianceCommon});
-  await ensureNamedChannel(env,discordGuildId,channels,{name:"일반채팅",type:0,parent_id:allianceCategory.id,topic:"연합 일반 채팅",permission_overwrites:allianceCommon});
-  await ensureNamedChannel(env,discordGuildId,channels,{name:"음성채팅",type:2,parent_id:allianceCategory.id,permission_overwrites:allianceVoice});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"📢공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
+  const participation=await ensureNamedChannel(env,discordGuildId,channels,{name:"✅참여체크",type:0,parent_id:allianceCategory.id,topic:"연합 쟁/행사 참여조사",permission_overwrites:allianceCommon});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"💬일반채팅",type:0,parent_id:allianceCategory.id,topic:"연합 일반 채팅",permission_overwrites:allianceCommon});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"🔊음성채팅",type:2,parent_id:allianceCategory.id,permission_overwrites:allianceVoice});
 
   // 서버별 보스채널 + 길드별 공지/음성
   const createdServers=[];
   const channelMap=new Map((config.channels||[]).map(c=>[`${c.kind}:${c.scope}:${c.server_id||""}`,String(c.channel_id||"")]));
   for(const s of (config.servers||[])){
     const serverId=String(s.server_id||""),serverName=String(s.server_name||serverId||"서버");
-    const serverGuilds=(config.guilds||[]).filter(g=>String(g.server_id||"")===serverId);
+    const serverGuilds=(config.guilds||[]).filter(g=>
+      String(g.server_id||"")===serverId &&
+      String(g.status||"active").toLowerCase()!=="inactive"
+    );
+
+    if(!serverGuilds.length){
+      await cleanupEmptyDefaultServer(env,discordGuildId,channels,serverName,serverGuilds);
+      continue;
+    }
+
     const serverRoles=serverGuilds.map(g=>guildRoleMap.get(String(g.guild_id))).filter(Boolean);
 
     const serverOverwrites=[
@@ -505,8 +552,8 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
     const serverRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,...serverRoles.map(r=>roleOverwrite(r.id,gcReadBits()))];
     const serverUse=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffText,...serverRoles.map(r=>roleOverwrite(r.id,gcTextUseBits()))];
 
-    const alert=await ensureNamedChannel(env,discordGuildId,channels,{name:"보스알림",type:0,parent_id:serverCategory.id,topic:`${serverName} 서버보스/월드보스 알림`,permission_overwrites:serverRead});
-    const attendance=await ensureNamedChannel(env,discordGuildId,channels,{name:"보스참여",type:0,parent_id:serverCategory.id,topic:`${serverName} 보스 참여체크`,permission_overwrites:serverUse});
+    const alert=await ensureNamedChannel(env,discordGuildId,channels,{name:"🔔보스알림",type:0,parent_id:serverCategory.id,topic:`${serverName} 서버보스/월드보스 알림`,permission_overwrites:serverRead});
+    const attendance=await ensureNamedChannel(env,discordGuildId,channels,{name:"⚔️보스참여",type:0,parent_id:serverCategory.id,topic:`${serverName} 보스 참여체크`,permission_overwrites:serverUse});
 
     if(channelMap.get(`alert:SERVER:${serverId}`)!==String(alert.id)){
       await apiCall(env,discordGuildId,"discord_channel_set",{kind:"alert",scope:"SERVER",server_id:serverId,channel_id:alert.id});
@@ -519,8 +566,8 @@ async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=fal
       const gr=guildRoleMap.get(String(g.guild_id));if(!gr)continue;
       const gRead=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffRead,roleOverwrite(gr.id,gcReadBits())];
       const gVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),botAccess,...staffVoice,roleOverwrite(gr.id,gcVoiceBits())];
-      await ensureNamedChannel(env,discordGuildId,channels,{name:`${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
-      await ensureNamedChannel(env,discordGuildId,channels,{name:`${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`📌${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`🔊${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
     }
 
     createdServers.push({server_id:serverId,server_name:serverName,alert_channel_id:alert.id,attendance_channel_id:attendance.id,guild_count:serverGuilds.length});
@@ -540,7 +587,7 @@ async function findAllianceParticipationChannel(env,discordGuildId,config){
   const channels=await getChannels(env,discordGuildId);
   const cat=channels.find(c=>Number(c.type)===4&&String(c.name)===String(config.alliance_name||""));
   if(!cat)return "";
-  const ch=channels.find(c=>Number(c.type)===0&&String(c.parent_id||"")===String(cat.id)&&String(c.name)==="참여체크");
+  const ch=channels.find(c=>Number(c.type)===0&&String(c.parent_id||"")===String(cat.id)&&normalizeManagedName(c.name)==="참여체크");
   return String(ch?.id||"");
 }
 
@@ -1013,7 +1060,7 @@ async function flushAlerts(env, discordGuildId) {
   discordGuildId=discordGuildId||env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID;
   let config,pulled;try{config=await getConfig(env,discordGuildId);pulled=await apiCall(env,discordGuildId,"alerts_pull",{limit:20,target:"discord"});}catch(e){console.log("alert pull/config error",discordGuildId,e.message);return;}
   const alerts=pulled.alerts||[];if(!alerts.length)return;
-  const channels=await getChannels(env,discordGuildId),fallback=channels.find(c=>c.type===0&&["보스알림","boss-alert","boss-alerts"].includes(String(c.name).toLowerCase().replace(/\s+/g,""))),sent=[];
+  const channels=await getChannels(env,discordGuildId),fallback=channels.find(c=>c.type===0&&["보스알림","boss-alert","boss-alerts"].includes(normalizeManagedName(c.name).toLowerCase().replace(/\s+/g,""))),sent=[];
   for(const a of alerts){
     let targets=String(a.discord_channel_ids||"").split(",").map(x=>x.trim()).filter(Boolean);if(!targets.length&&a.discord_channel_id)targets=[String(a.discord_channel_id)];if(!targets.length&&config.discord_alert_channel_id)targets=[String(config.discord_alert_channel_id)];if(!targets.length&&fallback?.id)targets=[String(fallback.id)];targets=[...new Set(targets)];if(!targets.length)continue;
     let ok=true;
