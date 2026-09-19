@@ -206,6 +206,41 @@ async function getGuildRoles(env, guildId) {
   return res.json();
 }
 
+async function createDiscordRole(env, guildId, roleName) {
+  const name = String(roleName || "").trim();
+  if (!name) throw new Error("생성할 Discord 역할명이 비어 있습니다.");
+
+  const res = await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles`, {
+    method: "POST",
+    headers: botHeaders(env),
+    body: JSON.stringify({
+      name,
+      permissions: "0",
+      hoist: false,
+      mentionable: false
+    })
+  });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Discord 역할 '${name}' 자동생성 실패 (${res.status}). GuildCore 봇에 '역할 관리' 권한이 있는지 확인하세요. ${detail.slice(0, 180)}`);
+  }
+  return res.json();
+}
+
+async function ensureDiscordRole(env, guildId, roles, roleName, preferredRoleId = "") {
+  const name = String(roleName || "").trim();
+  const preferred = String(preferredRoleId || "").trim();
+
+  let role = preferred ? roles.find(r => r.id === preferred) : null;
+  if (!role && name) role = roles.find(r => r.name === name);
+  if (role) return role;
+
+  role = await createDiscordRole(env, guildId, name);
+  roles.push(role);
+  return role;
+}
+
 async function addRole(env, guildId, userId, roleId) {
   const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`, { method: "PUT", headers: botHeaders(env, false) });
   if (!r.ok) throw new Error(`역할 부여 실패 ${r.status}: ${await r.text()}`);
@@ -250,10 +285,22 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
   });
 
   const roles = await getGuildRoles(env, discordGuildId);
-  const allianceRole = roles.find(r => r.name === data.alliance_role_name);
-  const selectedRole = data.discord_role_id ? roles.find(r => r.id === data.discord_role_id) : roles.find(r => r.name === data.discord_role_name);
-  if (!allianceRole) throw new Error(`Discord 역할 '${data.alliance_role_name}'을 찾을 수 없습니다.`);
-  if (!selectedRole) throw new Error(`Discord 역할 '${data.discord_role_name}'을 찾을 수 없습니다.`);
+
+  // V3.11: 연합/길드 역할이 Discord에 없으면 등록 시 자동 생성.
+  // 기존 role_id가 오래되어 사라진 경우에도 역할명으로 다시 찾고, 없으면 새로 만든다.
+  const allianceRole = await ensureDiscordRole(
+    env,
+    discordGuildId,
+    roles,
+    data.alliance_role_name || "연합원"
+  );
+  const selectedRole = await ensureDiscordRole(
+    env,
+    discordGuildId,
+    roles,
+    data.discord_role_name || data.guild_name,
+    data.discord_role_id || ""
+  );
 
   const oldGuildRoleIds = roles.filter(r => (data.all_guild_role_names || []).includes(r.name) && r.id !== selectedRole.id).map(r => r.id);
   for (const roleId of oldGuildRoleIds) await removeRole(env, discordGuildId, userId, roleId);
@@ -726,7 +773,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.10 V6 Direct D1 OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.11 V6 Direct D1 OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
