@@ -73,6 +73,9 @@ function commands() {
   return [
     { name:"핑", type:1, description:"GuildCore 본체 연결 상태를 확인합니다." },
     { name:"도움", type:1, description:"GuildCore 명령어 목록을 채팅창에 표시합니다." },
+    { name:"초기설정", type:1, description:"연합 연결 후 서버/길드 구조를 자동 구성합니다.", options:[{name:"연합",description:"연결할 GuildCore 연합",type:3,required:true,autocomplete:true}] },
+    { name:"동기화", type:1, description:"GuildCore 서버/길드 구조를 Discord에 즉시 동기화합니다." },
+    { name:"참여체크생성", type:1, description:"연합 참여조사를 생성합니다. 연합운영진 이상.", options:[{name:"제목",description:"예: 00 쟁 참여조사",type:3,required:true,max_length:80}] },
     { name:"서버연결", type:1, description:"현재 Discord 서버를 GuildCore 연합에 연결합니다.", options:[{name:"연합",description:"연결할 활성 연합",type:3,required:true,autocomplete:true}] },
     { name:"서버연결해제", type:1, description:"현재 Discord 서버와 연합 연결을 해제합니다." },
     { name:"보스알림채널설정", type:1, description:"현재 채널을 보스 자동알림 채널로 설정합니다.", options:[{name:"범위",description:"전체/월드/특정 서버",type:3,required:false,choices:scopeChoices},{name:"서버",description:"범위가 서버일 때 선택",type:3,required:false,autocomplete:true}] },
@@ -232,7 +235,8 @@ async function ensureDiscordRole(env, guildId, roles, roleName, preferredRoleId 
   const name = String(roleName || "").trim();
   const preferred = String(preferredRoleId || "").trim();
 
-  let role = preferred ? roles.find(r => r.id === preferred) : null;
+  // 오래된/잘못된 role_id가 다른 역할을 가리키는 경우를 막는다.
+  let role = preferred ? roles.find(r => r.id === preferred && (!name || r.name === name)) : null;
   if (!role && name) role = roles.find(r => r.name === name);
   if (role) return role;
 
@@ -251,6 +255,293 @@ async function removeRole(env, guildId, userId, roleId) {
   if (!r.ok && r.status !== 404) throw new Error(`역할 제거 실패 ${r.status}: ${await r.text()}`);
 }
 
+async function getDiscordMember(env, guildId, userId) {
+  const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
+    headers: botHeaders(env, false)
+  });
+  if (!r.ok) throw new Error(`Discord 멤버 확인 실패 ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+async function verifyAssignedRoles(env, guildId, userId, expectedRoles) {
+  const member = await getDiscordMember(env, guildId, userId);
+  const owned = new Set((member.roles || []).map(String));
+  const missing = (expectedRoles || []).filter(r => r && !owned.has(String(r.id)));
+  return { ok: missing.length === 0, member, missing };
+}
+
+
+const DISCORD_PERMS = {
+  ADD_REACTIONS: 64n,
+  VIEW_CHANNEL: 1024n,
+  SEND_MESSAGES: 2048n,
+  EMBED_LINKS: 16384n,
+  ATTACH_FILES: 32768n,
+  READ_MESSAGE_HISTORY: 65536n,
+  MANAGE_NICKNAMES: 134217728n,
+  MANAGE_ROLES: 268435456n,
+  USE_APPLICATION_COMMANDS: 2147483648n
+};
+
+const GC_CONNECT = 1048576n;
+const GC_SPEAK = 2097152n;
+
+const GC_MEMBER_PERMISSIONS = (
+  DISCORD_PERMS.ADD_REACTIONS |
+  DISCORD_PERMS.VIEW_CHANNEL |
+  DISCORD_PERMS.SEND_MESSAGES |
+  DISCORD_PERMS.EMBED_LINKS |
+  DISCORD_PERMS.ATTACH_FILES |
+  DISCORD_PERMS.READ_MESSAGE_HISTORY |
+  DISCORD_PERMS.USE_APPLICATION_COMMANDS
+).toString();
+
+function permBits(...items) {
+  return items.reduce((n, v) => n | BigInt(v), 0n).toString();
+}
+
+async function updateDiscordRolePermissions(env, guildId, role, permissions) {
+  const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/roles/${role.id}`, {
+    method: "PATCH",
+    headers: botHeaders(env),
+    body: JSON.stringify({ permissions: String(permissions) })
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`Discord 역할 '${role.name}' 권한 설정 실패 (${r.status}). ${detail.slice(0,180)}`);
+  }
+  return r.json();
+}
+
+async function ensureSystemRole(env, guildId, roles, name, permissions = "0") {
+  const role = await ensureDiscordRole(env, guildId, roles, name);
+  // /초기설정은 GuildCore 시스템 역할을 기준값으로 동기화한다.
+  if (String(role.permissions || "") !== String(permissions)) {
+    const updated = await updateDiscordRolePermissions(env, guildId, role, permissions);
+    const i = roles.findIndex(r => r.id === role.id);
+    if (i >= 0) roles[i] = updated;
+    return updated;
+  }
+  return role;
+}
+
+async function createDiscordChannel(env, guildId, payload) {
+  const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+    method: "POST",
+    headers: botHeaders(env),
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`Discord 채널 '${payload.name || ""}' 생성 실패 (${r.status}). GuildCore 봇에 '채널 관리' 권한이 있는지 확인하세요. ${detail.slice(0,180)}`);
+  }
+  return r.json();
+}
+
+async function patchDiscordChannel(env, channelId, payload) {
+  const r = await fetch(`https://discord.com/api/v10/channels/${channelId}`, {
+    method: "PATCH",
+    headers: botHeaders(env),
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`Discord 채널 설정 실패 (${r.status}). ${detail.slice(0,180)}`);
+  }
+  return r.json();
+}
+
+async function ensureGuildCoreCategory(env, guildId, channels) {
+  let category = channels.find(c => Number(c.type) === 4 && String(c.name) === "GuildCore");
+  if (!category) {
+    category = await createDiscordChannel(env, guildId, { name:"GuildCore", type:4 });
+    channels.push(category);
+  }
+  return category;
+}
+
+async function ensureGuildCoreTextChannel(env, guildId, channels, categoryId, spec) {
+  let channel = channels.find(c =>
+    Number(c.type) === 0 &&
+    String(c.parent_id || "") === String(categoryId) &&
+    String(c.name) === String(spec.name)
+  );
+
+  const payload = {
+    name: spec.name,
+    type: 0,
+    parent_id: categoryId,
+    topic: spec.topic || "",
+    permission_overwrites: spec.permission_overwrites || []
+  };
+
+  if (!channel) {
+    channel = await createDiscordChannel(env, guildId, payload);
+    channels.push(channel);
+  } else {
+    channel = await patchDiscordChannel(env, channel.id, {
+      parent_id: categoryId,
+      topic: spec.topic || "",
+      permission_overwrites: spec.permission_overwrites || []
+    });
+    const i = channels.findIndex(c => c.id === channel.id);
+    if (i >= 0) channels[i] = channel;
+  }
+  return channel;
+}
+
+async function getBotGuildMember(env, guildId) {
+  const me = await fetch("https://discord.com/api/v10/users/@me", { headers:botHeaders(env,false) });
+  if (!me.ok) throw new Error(`Discord 봇 정보 확인 실패 ${me.status}: ${await me.text()}`);
+  const user = await me.json();
+  return getDiscordMember(env, guildId, user.id);
+}
+
+
+function gcTextUseBits(){return permBits(DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.SEND_MESSAGES,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.USE_APPLICATION_COMMANDS,DISCORD_PERMS.ADD_REACTIONS);}
+function gcReadBits(){return permBits(DISCORD_PERMS.VIEW_CHANNEL,DISCORD_PERMS.READ_MESSAGE_HISTORY,DISCORD_PERMS.USE_APPLICATION_COMMANDS);}
+function gcVoiceBits(){return (DISCORD_PERMS.VIEW_CHANNEL|GC_CONNECT|GC_SPEAK).toString();}
+function gcDenyView(){return String(DISCORD_PERMS.VIEW_CHANNEL);}
+function roleOverwrite(roleId,allow,deny="0"){return {id:String(roleId),type:0,allow:String(allow),deny:String(deny)};}
+
+async function ensureNamedCategory(env,guildId,channels,name,overwrites=[]){
+  let c=channels.find(x=>Number(x.type)===4&&String(x.name)===String(name));
+  if(!c){c=await createDiscordChannel(env,guildId,{name,type:4,permission_overwrites:overwrites});channels.push(c);}
+  return c;
+}
+
+async function ensureNamedChannel(env,guildId,channels,{name,type=0,parent_id=null,topic="",permission_overwrites=[]}){
+  let c=channels.find(x=>Number(x.type)===Number(type)&&String(x.name)===String(name)&&String(x.parent_id||"")===String(parent_id||""));
+  if(!c){
+    const payload={name,type,permission_overwrites};
+    if(parent_id)payload.parent_id=parent_id;
+    if(type===0&&topic)payload.topic=topic;
+    c=await createDiscordChannel(env,guildId,payload);channels.push(c);
+  }
+  return c;
+}
+
+async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=false}={}){
+  if(!config?.alliance_name)throw new Error("GuildCore 연합 설정을 불러오지 못했습니다.");
+  await getBotGuildMember(env,discordGuildId);
+
+  const roles=await getGuildRoles(env,discordGuildId);
+  const allianceOwner=await ensureDiscordRole(env,discordGuildId,roles,"연합장");
+  const allianceManager=await ensureDiscordRole(env,discordGuildId,roles,"연합운영진");
+  const allianceMember=await ensureDiscordRole(env,discordGuildId,roles,"연합원");
+
+  const guildRoleMap=new Map();
+  for(const g of (config.guilds||[])){
+    const roleName=String(g.discord_role_name||g.guild_name||"").trim();
+    if(!roleName)continue;
+    const role=await ensureDiscordRole(env,discordGuildId,roles,roleName);
+    guildRoleMap.set(String(g.guild_id),role);
+  }
+
+  const channels=await getChannels(env,discordGuildId);
+  const everyoneId=discordGuildId;
+  const staffText=[roleOverwrite(allianceOwner.id,gcTextUseBits()),roleOverwrite(allianceManager.id,gcTextUseBits())];
+  const staffRead=[roleOverwrite(allianceOwner.id,gcReadBits()),roleOverwrite(allianceManager.id,gcReadBits())];
+  const staffVoice=[roleOverwrite(allianceOwner.id,gcVoiceBits()),roleOverwrite(allianceManager.id,gcVoiceBits())];
+
+  // 등록은 카테고리 밖: 미등록 사용자도 접근
+  const registerChannel=await ensureNamedChannel(env,discordGuildId,channels,{
+    name:"등록",type:0,topic:"GuildCore 길드원 등록 · /등록",
+    permission_overwrites:[roleOverwrite(everyoneId,gcTextUseBits())]
+  });
+
+  // 연합 기본 카테고리
+  const allianceOverwrites=[
+    roleOverwrite(everyoneId,"0",gcDenyView()),
+    roleOverwrite(allianceOwner.id,gcTextUseBits()),
+    roleOverwrite(allianceManager.id,gcTextUseBits()),
+    roleOverwrite(allianceMember.id,gcTextUseBits())
+  ];
+  const allianceCategory=await ensureNamedCategory(env,discordGuildId,channels,String(config.alliance_name),allianceOverwrites);
+
+  const allianceCommon=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffText,roleOverwrite(allianceMember.id,gcTextUseBits())];
+  const allianceRead=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffRead,roleOverwrite(allianceMember.id,gcReadBits())];
+  const allianceVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffVoice,roleOverwrite(allianceMember.id,gcVoiceBits())];
+
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"공지사항",type:0,parent_id:allianceCategory.id,topic:"연합 공지사항",permission_overwrites:allianceRead});
+  const participation=await ensureNamedChannel(env,discordGuildId,channels,{name:"참여체크",type:0,parent_id:allianceCategory.id,topic:"연합 쟁/행사 참여조사",permission_overwrites:allianceCommon});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"일반채팅",type:0,parent_id:allianceCategory.id,topic:"연합 일반 채팅",permission_overwrites:allianceCommon});
+  await ensureNamedChannel(env,discordGuildId,channels,{name:"음성채팅",type:2,parent_id:allianceCategory.id,permission_overwrites:allianceVoice});
+
+  // 서버별 보스채널 + 길드별 공지/음성
+  const createdServers=[];
+  const channelMap=new Map((config.channels||[]).map(c=>[`${c.kind}:${c.scope}:${c.server_id||""}`,String(c.channel_id||"")]));
+  for(const s of (config.servers||[])){
+    const serverId=String(s.server_id||""),serverName=String(s.server_name||serverId||"서버");
+    const serverGuilds=(config.guilds||[]).filter(g=>String(g.server_id||"")===serverId);
+    const serverRoles=serverGuilds.map(g=>guildRoleMap.get(String(g.guild_id))).filter(Boolean);
+
+    const serverOverwrites=[
+      roleOverwrite(everyoneId,"0",gcDenyView()),
+      roleOverwrite(allianceOwner.id,gcTextUseBits()),
+      roleOverwrite(allianceManager.id,gcTextUseBits()),
+      ...serverRoles.map(r=>roleOverwrite(r.id,gcTextUseBits()))
+    ];
+    const serverCategory=await ensureNamedCategory(env,discordGuildId,channels,serverName,serverOverwrites);
+
+    const serverRead=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffRead,...serverRoles.map(r=>roleOverwrite(r.id,gcReadBits()))];
+    const serverUse=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffText,...serverRoles.map(r=>roleOverwrite(r.id,gcTextUseBits()))];
+
+    const alert=await ensureNamedChannel(env,discordGuildId,channels,{name:"보스알림",type:0,parent_id:serverCategory.id,topic:`${serverName} 서버보스/월드보스 알림`,permission_overwrites:serverRead});
+    const attendance=await ensureNamedChannel(env,discordGuildId,channels,{name:"보스참여",type:0,parent_id:serverCategory.id,topic:`${serverName} 보스 참여체크`,permission_overwrites:serverUse});
+
+    if(channelMap.get(`alert:SERVER:${serverId}`)!==String(alert.id)){
+      await apiCall(env,discordGuildId,"discord_channel_set",{kind:"alert",scope:"SERVER",server_id:serverId,channel_id:alert.id});
+    }
+    if(channelMap.get(`attendance:SERVER:${serverId}`)!==String(attendance.id)){
+      await apiCall(env,discordGuildId,"discord_channel_set",{kind:"attendance",scope:"SERVER",server_id:serverId,channel_id:attendance.id});
+    }
+
+    for(const g of serverGuilds){
+      const gr=guildRoleMap.get(String(g.guild_id));if(!gr)continue;
+      const gRead=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffRead,roleOverwrite(gr.id,gcReadBits())];
+      const gVoice=[roleOverwrite(everyoneId,"0",gcDenyView()),...staffVoice,roleOverwrite(gr.id,gcVoiceBits())];
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`${g.guild_name}-공지사항`,type:0,parent_id:serverCategory.id,topic:`${g.guild_name} 길드 공지사항`,permission_overwrites:gRead});
+      await ensureNamedChannel(env,discordGuildId,channels,{name:`${g.guild_name}-음성채팅`,type:2,parent_id:serverCategory.id,permission_overwrites:gVoice});
+    }
+
+    createdServers.push({server_id:serverId,server_name:serverName,alert_channel_id:alert.id,attendance_channel_id:attendance.id,guild_count:serverGuilds.length});
+  }
+
+  if(sendWelcome){
+    try{await sendChannelMessage(env,registerChannel.id,"✅ **GuildCore 서버 구성이 완료되었습니다.**\n길드원은 `/등록` → 길드 선택 → 게임 닉네임 입력을 진행하세요.");}catch(_){}
+  }
+
+  try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
+  await cachePut(`config:${discordGuildId}`,await apiCall(env,discordGuildId,"config"),120);
+
+  return {alliance_name:config.alliance_name,register_channel_id:registerChannel.id,alliance_category_id:allianceCategory.id,participation_channel_id:participation.id,server_count:createdServers.length,guild_count:(config.guilds||[]).length,servers:createdServers};
+}
+
+async function findAllianceParticipationChannel(env,discordGuildId,config){
+  const channels=await getChannels(env,discordGuildId);
+  const cat=channels.find(c=>Number(c.type)===4&&String(c.name)===String(config.alliance_name||""));
+  if(!cat)return "";
+  const ch=channels.find(c=>Number(c.type)===0&&String(c.parent_id||"")===String(cat.id)&&String(c.name)==="참여체크");
+  return String(ch?.id||"");
+}
+
+async function syncCurrentDiscordServer(env,discordGuildId){
+  const config=await apiCall(env,discordGuildId,"config");
+  return syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false});
+}
+
+
+async function runInitialSetup(interaction, env) {
+  requireManager(interaction);
+  const discordGuildId=interaction.guild_id,query=String(getOption(interaction,"연합")||"").trim();
+  if(!query)throw new Error("연결할 연합을 선택하세요.");
+  const bound=await apiCall(env,discordGuildId,"discord_bind_alliance",{query});
+  try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
+  const config=await apiCall(env,discordGuildId,"config");
+  const synced=await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:true});
+  return {content:`✅ **GuildCore 초기설정 완료**\n연합: ${bound.alliance_name||config.alliance_name}\n등록 채널: <#${synced.register_channel_id}>\n연합 카테고리: ${config.alliance_name}\n서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개 자동 구성\n\n이후 GuildCore 웹에서 길드를 추가하면 자동 동기화됩니다.`};
+}
 async function changeNickname(env, guildId, userId, nickname) {
   const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
     method: "PATCH",
@@ -304,14 +595,33 @@ async function applyRegistration(interaction, env, selectedGuildId, nickname) {
 
   const oldGuildRoleIds = roles.filter(r => (data.all_guild_role_names || []).includes(r.name) && r.id !== selectedRole.id).map(r => r.id);
   for (const roleId of oldGuildRoleIds) await removeRole(env, discordGuildId, userId, roleId);
+
   await addRole(env, discordGuildId, userId, allianceRole.id);
   await addRole(env, discordGuildId, userId, selectedRole.id);
+
+  // Discord가 204를 반환했더라도 실제 멤버 역할에 반영됐는지 다시 조회해서 검증한다.
+  const roleCheck = await verifyAssignedRoles(env, discordGuildId, userId, [allianceRole, selectedRole]);
+  if (!roleCheck.ok) {
+    const names = roleCheck.missing.map(r => r.name).join(", ");
+    throw new Error(
+      `Discord 역할 부여 확인 실패: ${names}. ` +
+      `GuildCore 봇 역할을 '${names}' 역할보다 위에 두고 '역할 관리' 권한을 확인하세요.`
+    );
+  }
+
   const nickResult = await changeNickname(env, discordGuildId, userId, data.discord_display_name);
 
   await refreshConfig(env, discordGuildId);
 
-  let content = `✅ ${data.reregistered ? "재등록" : "등록"} 완료\n길드: ${data.guild_name}\n닉네임: ${data.discord_display_name}`;
-  if (!nickResult.ok) content += "\n\n⚠️ 본체 저장/역할 등록은 완료됐지만 Discord 닉네임 자동변경은 실패했습니다. 서버 소유자 계정은 봇이 닉네임을 바꿀 수 없습니다.";
+  let content =
+    `✅ ${data.reregistered ? "재등록" : "등록"} 완료\n` +
+    `길드: ${data.guild_name}\n` +
+    `Discord 역할: ${allianceRole.name}, ${selectedRole.name}\n` +
+    `닉네임: ${data.discord_display_name}`;
+
+  if (!nickResult.ok) {
+    content += "\n\n⚠️ 역할 부여는 실제 멤버 정보에서 확인됐습니다. Discord 닉네임 자동변경만 실패했습니다. 서버 소유자 계정은 봇이 닉네임을 바꿀 수 없습니다.";
+  }
   return { content };
 }
 
@@ -377,7 +687,9 @@ function discordHelpContent() {
     "`/아이템내역` · `/아이템등록` · `/아이템판매`",
     "`/길드비용현황` · `/길드비용` · `/참여통계` · `/정산조회`",
     "",
-    "**Discord 연결 관리**",
+    "**Discord 초기 설치/연결 관리**",
+    "`/초기설정` → 연합/서버/길드 채널 자동 구성 · `/동기화` 즉시 재동기화",
+    "`/참여체크생성 제목` → 연합 참여체크 채널에 쟁/행사 참여조사 생성",
     "`/서버연결` · `/서버연결해제` · `/보스알림채널설정` · `/출석채널설정` · `/보스알림테스트`",
     "",
     "보스 출석은 컷 후 10분에 자동 종료되며 운영진이 먼저 종료할 수도 있습니다."
@@ -385,6 +697,28 @@ function discordHelpContent() {
 }
 
 
+
+
+function manualParticipationComponents(eventId){
+  return [{type:1,components:[
+    {type:2,style:3,label:"참여",custom_id:`attend:${eventId}`},
+    {type:2,style:4,label:"취소",custom_id:`cancel:${eventId}`},
+    {type:2,style:2,label:"마감",custom_id:`pclose:${eventId}`}
+  ]}];
+}
+
+function manualParticipationContent(data){
+  const people=data?.participants||[],groups={};
+  people.forEach(p=>{const k=String(p.guild_name||"미등록 길드");(groups[k]||(groups[k]=[])).push(String(p.nickname||""));});
+  const body=Object.keys(groups).sort().map(k=>`[${k}] ${groups[k].filter(Boolean).join(" · ")}`).join("\n")||"아직 참여자가 없습니다.";
+  const closed=String(data?.attendance_status||"open")!=="open";
+  return `⚔️ **${data.boss_name||"참여조사"}**\n${closed?"참여체크 종료":"참여조사 진행 중"} · 참여 ${people.length}명\n\n${body}`.slice(0,1950);
+}
+
+function attendancePayload(data){
+  const manual=String(data?.event_type||"")==="manual_participation";
+  return {content:manual?manualParticipationContent(data):attendanceContent(data),components:String(data?.attendance_status||"open")==="open"?(manual?manualParticipationComponents(data.event_id):attendanceComponents(data.event_id)):[]};
+}
 
 function attendanceComponents(eventId) {
   return [{ type: 1, components: [
@@ -467,6 +801,23 @@ async function handleCommandAsync(interaction, env) {
   }
   if (name === "핑") { const h=await apiCall(env,discordGuildId,"health"); return {content:`✅ GuildCore 정상 연결\n연합: ${h.alliance_id}`}; }
   if (name === "도움") return {content:discordHelpContent()};
+  if (name === "초기설정") return await runInitialSetup(interaction, env);
+  if (name === "동기화") {
+    requireManager(interaction);
+    const r=await syncCurrentDiscordServer(env,discordGuildId);
+    return {content:`✅ GuildCore 동기화 완료\n서버 ${r.server_count}개 · 길드 ${r.guild_count}개`};
+  }
+  if (name === "참여체크생성") {
+    const title=String(getOption(interaction,"제목")||"").trim();
+    const created=await apiCall(env,discordGuildId,"participation_create",{...actor,title});
+    const cfg=await getConfig(env,discordGuildId);
+    const target=await findAllianceParticipationChannel(env,discordGuildId,cfg);
+    if(!target)throw new Error("연합 참여체크 채널이 없습니다. 서버 관리자에게 /동기화 실행을 요청하세요.");
+    const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:created.event_id});
+    const msg=await sendChannelMessage(env,target,attendancePayload(list));
+    if(msg?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:created.event_id,message_id:msg.id,channel_id:target});
+    return {content:`✅ **${title}** 참여체크를 <#${target}> 에 생성했습니다.`};
+  }
   if (name === "등록") return await beginRegistration(interaction, env);
 
   if (name === "보스알림채널설정" || name === "출석채널설정") {
@@ -503,12 +854,15 @@ async function handleCommandAsync(interaction, env) {
     const brief=`${cut.boss_name}\n컷 ${hhmm(cut.cut_at)}\n예정 ${hhmm(cut.next_spawn_at)}`;
     if(!cut.event_id) return {content:brief};
     const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:cut.event_id});
-    const msg={content:attendanceContent(list),components:attendanceComponents(cut.event_id)};
-    const target=String(cut.attendance_channel_id||interaction.channel_id||"");
-    if(!target) throw new Error("출석 메시지를 보낼 채널을 찾을 수 없습니다.");
-    const sent=await sendChannelMessage(env,target,msg);
-    if(sent?.id) await apiCall(env,discordGuildId,"attendance_message_link",{event_id:cut.event_id,message_id:sent.id,channel_id:target});
-    return {content:`${brief}\n출석 → <#${target}>`};
+    let targets=String(cut.attendance_channel_ids||cut.attendance_channel_id||"").split(",").map(x=>x.trim()).filter(Boolean);
+    if(!targets.length&&interaction.channel_id)targets=[String(interaction.channel_id)];
+    targets=[...new Set(targets)];
+    if(!targets.length)throw new Error("출석 메시지를 보낼 채널을 찾을 수 없습니다.");
+    for(const target of targets){
+      const sent=await sendChannelMessage(env,target,attendancePayload(list));
+      if(sent?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:cut.event_id,message_id:sent.id,channel_id:target});
+    }
+    return {content:`${brief}\n출석 → ${targets.map(x=>`<#${x}>`).join(" · ")}`};
   }
   if (name === "젠") {
     const r=await apiCall(env,discordGuildId,"boss_spawn",{...actor,boss:getOption(interaction,"보스"),spawn_at:getOption(interaction,"시각")||""});await clearBossCache();
@@ -528,15 +882,12 @@ async function handleCommandAsync(interaction, env) {
   if (name === "보스제거") {const r=await apiCall(env,discordGuildId,"boss_disable",{...actor,boss:getOption(interaction,"보스")});await clearBossCache();return {content:`✅ ${r.boss_name} · ${r.message}`};}
   if (name === "출석종료") {
     const r=await apiCall(env,discordGuildId,"attendance_close",{...actor,boss:getOption(interaction,"보스")});
-    if(r.discord_message_id&&r.discord_channel_id&&r.summary) await editChannelMessage(env,r.discord_channel_id,r.discord_message_id,{content:r.summary,components:[]});
-    else if(r.summary){const ch=String(r.discord_channel_id||interaction.channel_id||"");if(ch)await sendChannelMessage(env,ch,{content:r.summary,components:[]});}
-    if(r.result_id) await apiCall(env,discordGuildId,"attendance_results_mark",{target:"discord",result_ids:[r.result_id],status:"sent",note:"수동 종료 즉시 반영"});
     return {content:`✅ ${r.boss_name||"보스"} 출석 종료`};
   }
   if (name === "참여삭제") {
     const r=await apiCall(env,discordGuildId,"attendance_remove",{...actor,boss:getOption(interaction,"보스"),nickname:getOption(interaction,"닉네임")});
     const list=r.attendance||await apiCall(env,discordGuildId,"attendance_list",{event_id:r.event_id});
-    if(list.discord_message_id&&list.discord_channel_id) await editChannelMessage(env,list.discord_channel_id,list.discord_message_id,{content:attendanceContent(list),components:attendanceComponents(list.event_id)});
+    if(list.discord_message_id&&list.discord_channel_id) await editChannelMessage(env,list.discord_channel_id,list.discord_message_id,attendancePayload(list));
     return {content:`✅ ${r.message}`};
   }
   if (name === "내출석") {const r=await apiCall(env,discordGuildId,"my_attendance",{...actor,month:getOption(interaction,"월")||""});return {content:`📊 **${r.month} 내 출석**\n참여 ${r.count}회 / 전체 ${r.total_events}회 · ${r.rate}%`};}
@@ -559,15 +910,19 @@ async function handleCommandAsync(interaction, env) {
 
 
 
+
 async function handleAttendanceButton(interaction, env, attended) {
   const discordGuildId=interaction.guild_id,userId=interaction.member?.user?.id||"",eventId=String(interaction.data?.custom_id||"").split(":")[1]||"";
   await apiCall(env,discordGuildId,"attendance_set",{discord_user_id:userId,event_id:eventId,attended});
   const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:eventId});
-  return {content:attendanceContent(list),components:String(list.attendance_status)==="open"?attendanceComponents(eventId):[]};
+  return attendancePayload(list);
 }
-
-
-
+async function handleParticipationCloseButton(interaction,env){
+  const discordGuildId=interaction.guild_id,userId=interaction.member?.user?.id||"",eventId=String(interaction.data?.custom_id||"").split(":")[1]||"";
+  await apiCall(env,discordGuildId,"attendance_close",{discord_user_id:userId,event_id:eventId});
+  const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:eventId});
+  return attendancePayload(list);
+}
 async function autocomplete(interaction, env) {
   const discordGuildId=interaction.guild_id,userId=interaction.member?.user?.id||"",focused=(interaction.data?.options||[]).find(o=>o.focused);
   if(!focused)return {type:8,data:{choices:[]}};
@@ -612,36 +967,72 @@ async function editChannelMessage(env, channelId, messageId, payload) {
   try{return await r.json();}catch{return {}};
 }
 
-async function flushAttendanceResults(env) {
-  const discordGuildId=env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID;
-  let pulled;try{pulled=await apiCall(env,discordGuildId,"attendance_results_pull",{limit:20,target:"discord"});}catch(e){console.log("attendance result pull error",e.message);return;}
+
+async function flushAttendanceResults(env, discordGuildId) {
+  discordGuildId=discordGuildId||env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID;
+  let pulled;try{pulled=await apiCall(env,discordGuildId,"attendance_results_pull",{limit:20,target:"discord"});}catch(e){console.log("attendance result pull error",discordGuildId,e.message);return;}
   const done=[];
   for(const r of (pulled.results||[])){
     try{
-      if(r.discord_message_id&&r.discord_channel_id) await editChannelMessage(env,r.discord_channel_id,r.discord_message_id,{content:r.message,components:[]});
-      else { let ch=String(r.discord_channel_id||""); if(!ch){try{const resolved=await apiCall(env,discordGuildId,"attendance_channel_resolve",{event_id:r.event_id});ch=String(resolved.channel_id||"")}catch(_){}} if(!ch){try{const cfg=await getConfig(env,discordGuildId);ch=String(cfg.discord_attendance_channel_id||"")}catch(_){}} if(ch)await sendChannelMessage(env,ch,{content:r.message,components:[]}); else continue; }
+      const links=Array.isArray(r.discord_message_links)?r.discord_message_links.filter(x=>x?.channel_id&&x?.message_id):[];
+      if(links.length){
+        for(const link of links)await editChannelMessage(env,link.channel_id,link.message_id,{content:r.message,components:[]});
+      }else if(r.discord_message_id&&r.discord_channel_id){
+        await editChannelMessage(env,r.discord_channel_id,r.discord_message_id,{content:r.message,components:[]});
+      }else{
+        let targets=String(r.discord_channel_ids||r.discord_channel_id||"").split(",").map(x=>x.trim()).filter(Boolean);
+        targets=[...new Set(targets)];
+        for(const ch of targets)await sendChannelMessage(env,ch,{content:r.message,components:[]});
+        if(!targets.length)continue;
+      }
       done.push(r.result_id);
-    }catch(e){console.log("attendance result send error",r.result_id,e.message)}
+    }catch(e){console.log("attendance result send error",discordGuildId,r.result_id,e.message)}
   }
   if(done.length)await apiCall(env,discordGuildId,"attendance_results_mark",{target:"discord",result_ids:done,status:"sent"});
 }
 
-async function flushAlerts(env) {
-  const discordGuildId=env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID;
-  let config,pulled;try{config=await getConfig(env,discordGuildId);pulled=await apiCall(env,discordGuildId,"alerts_pull",{limit:20,target:"discord"});}catch(e){console.log("alert pull/config error",e.message);return;}
+async function flushAlerts(env, discordGuildId) {
+  discordGuildId=discordGuildId||env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID;
+  let config,pulled;try{config=await getConfig(env,discordGuildId);pulled=await apiCall(env,discordGuildId,"alerts_pull",{limit:20,target:"discord"});}catch(e){console.log("alert pull/config error",discordGuildId,e.message);return;}
   const alerts=pulled.alerts||[];if(!alerts.length)return;
   const channels=await getChannels(env,discordGuildId),fallback=channels.find(c=>c.type===0&&["보스알림","boss-alert","boss-alerts"].includes(String(c.name).toLowerCase().replace(/\s+/g,""))),sent=[];
   for(const a of alerts){
     let targets=String(a.discord_channel_ids||"").split(",").map(x=>x.trim()).filter(Boolean);if(!targets.length&&a.discord_channel_id)targets=[String(a.discord_channel_id)];if(!targets.length&&config.discord_alert_channel_id)targets=[String(config.discord_alert_channel_id)];if(!targets.length&&fallback?.id)targets=[String(fallback.id)];targets=[...new Set(targets)];if(!targets.length)continue;
-    let ok=true;for(const target of targets){try{await sendChannelMessage(env,target,a.message);}catch(e){ok=false;console.log("alert send error",a.alert_id,target,e.message)}}
-    if(ok&&String(a.alert_type)==="spawn"&&a.attendance_event_id){try{const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:a.attendance_event_id});let attCh=String(a.attendance_channel_id||"");if(!attCh){const resolved=await apiCall(env,discordGuildId,"attendance_channel_resolve",{event_id:a.attendance_event_id});attCh=String(resolved.channel_id||"");}if(attCh){const msg=await sendChannelMessage(env,attCh,{content:attendanceContent(list),components:attendanceComponents(a.attendance_event_id)});if(msg?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:a.attendance_event_id,message_id:msg.id,channel_id:attCh});}}catch(e){ok=false;console.log("scheduled attendance send error",a.alert_id,e.message)}}
+    let ok=true;
+    for(const target of targets){try{await sendChannelMessage(env,target,a.message);}catch(e){ok=false;console.log("alert send error",a.alert_id,target,e.message)}}
+    if(ok&&String(a.alert_type)==="spawn"&&a.attendance_event_id){
+      try{
+        const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:a.attendance_event_id});
+        let attTargets=String(a.attendance_channel_ids||a.attendance_channel_id||"").split(",").map(x=>x.trim()).filter(Boolean);
+        if(!attTargets.length){const resolved=await apiCall(env,discordGuildId,"attendance_channel_resolve",{event_id:a.attendance_event_id});attTargets=String(resolved.channel_ids||resolved.channel_id||"").split(",").map(x=>x.trim()).filter(Boolean);}
+        attTargets=[...new Set(attTargets)];
+        for(const attCh of attTargets){
+          const msg=await sendChannelMessage(env,attCh,attendancePayload(list));
+          if(msg?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:a.attendance_event_id,message_id:msg.id,channel_id:attCh});
+        }
+      }catch(e){ok=false;console.log("scheduled attendance send error",a.alert_id,e.message)}
+    }
     if(ok)sent.push(a.alert_id);
   }
   if(sent.length)await apiCall(env,discordGuildId,"alerts_mark",{alert_ids:sent,status:"sent",target:"discord"});
 }
 
-
-
+async function runDiscordCron(env){
+  let ids=[];
+  try{
+    const bound=await apiCall(env,"","discord_bound_servers",{});
+    ids=(bound.servers||[]).map(x=>String(x.discord_server_id||"")).filter(Boolean);
+  }catch(e){console.log("bound discord servers error",e.message);}
+  if(!ids.length)ids=[String(env.DISCORD_SERVER_ID||BOOTSTRAP_GUILD_ID)].filter(Boolean);
+  ids=[...new Set(ids)];
+  for(const discordGuildId of ids){
+    try{
+      const config=await apiCall(env,discordGuildId,"config");
+      await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false});
+    }catch(e){console.log("auto sync error",discordGuildId,e.message);}
+    await Promise.all([flushAlerts(env,discordGuildId),flushAttendanceResults(env,discordGuildId)]);
+  }
+}
 
 async function handleKakaoHttp(request, env) {
   if (!env.KAKAO_INPUT_KEY) {
@@ -773,7 +1164,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.11 V6 Direct D1 OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.14 SERVER GUILD AUTO SYNC OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
@@ -822,8 +1213,16 @@ export default {
       return Response.json({type:6});
     }
 
+    if (interaction.type === 3 && String(interaction.data?.custom_id || "").startsWith("pclose:")) {
+      ctx.waitUntil((async()=>{
+        try { await editOriginal(interaction, await handleParticipationCloseButton(interaction, env)); }
+        catch (e) { await editOriginal(interaction,{content:`❌ ${e.message}`}); }
+      })());
+      return Response.json({type:6});
+    }
+
     if (interaction.type === 2) {
-      const ephemeralNames = new Set(["핑","등록","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
+      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
       const ephemeral = ephemeralNames.has(interaction.data?.name);
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleCommandAsync(interaction, env)); }
@@ -836,6 +1235,6 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([flushAlerts(env),flushAttendanceResults(env)]));
+    ctx.waitUntil(runDiscordCron(env));
   }
 };
