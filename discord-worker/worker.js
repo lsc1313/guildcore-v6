@@ -1060,10 +1060,22 @@ async function flushAttendanceSync(env,discordGuildId){
   if(done.length)try{await apiCall(env,discordGuildId,"attendance_sync_mark",{event_ids:done,status:"sent"});}catch(e){console.log("attendance sync mark error",e.message)}
 }
 function uint8ToBase64(bytes){let out="";const step=0x8000;for(let i=0;i<bytes.length;i+=step)out+=String.fromCharCode(...bytes.subarray(i,Math.min(bytes.length,i+step)));return btoa(out);}
+function isImageAttachment_(att){
+  const ct=String(att?.content_type||"").toLowerCase();
+  if(ct.startsWith("image/"))return true;
+  const name=String(att?.filename||att?.url||"").toLowerCase().split("?")[0];
+  return /\.(png|jpe?g|webp|gif|bmp)$/i.test(name);
+}
+function attachmentMime_(att){
+  const ct=String(att?.content_type||"").split(";")[0].trim().toLowerCase();if(ct.startsWith("image/"))return ct;
+  const name=String(att?.filename||att?.url||"").toLowerCase().split("?")[0];
+  if(name.endsWith(".png"))return "image/png";if(name.endsWith(".webp"))return "image/webp";if(name.endsWith(".gif"))return "image/gif";if(name.endsWith(".bmp"))return "image/bmp";return "image/jpeg";
+}
 async function discordImageToInline(att){
   const size=Number(att?.size||0);if(size>8*1024*1024)throw new Error("이미지 한 장은 8MB 이하여야 합니다.");
-  const r=await fetch(String(att.url||att.proxy_url||""));if(!r.ok)throw new Error(`이미지 다운로드 실패 ${r.status}`);const ab=await r.arrayBuffer();
-  return {name:String(att.filename||"screenshot"),mime_type:String(att.content_type||"image/jpeg").split(";")[0],data:uint8ToBase64(new Uint8Array(ab))};
+  const url=String(att?.url||att?.proxy_url||"");if(!url)throw new Error("Discord 이미지 URL이 없습니다.");
+  const r=await fetch(url);if(!r.ok)throw new Error(`이미지 다운로드 실패 ${r.status}`);const ab=await r.arrayBuffer();
+  return {name:String(att.filename||"screenshot"),mime_type:attachmentMime_(att),data:uint8ToBase64(new Uint8Array(ab))};
 }
 async function getRecentChannelMessages(env,channelId,limit=20){
   const r=await fetch(`https://discord.com/api/v10/channels/${channelId}/messages?limit=${Math.max(1,Math.min(50,limit))}`,{headers:botHeaders(env,false)});if(!r.ok)throw new Error(`Discord 메시지 조회 실패 ${r.status}: ${await r.text()}`);return r.json();
@@ -1088,22 +1100,34 @@ function screenshotPickPayload(candidates,sourceMessageId){
   return {content:`⚠️ 열린/최근 보스 회차가 여러 개라 스크린샷 대상을 자동 결정할 수 없습니다.\n아래에서 이 스크린샷의 보스를 선택하세요.`,components:rows};
 }
 async function analyzeDiscordScreenshotMessage(env,discordGuildId,channelId,msg,eventId){
-  const atts=(msg?.attachments||[]).filter(a=>String(a.content_type||"").startsWith("image/")).slice(0,4);if(!atts.length)throw new Error("원본 메시지에서 이미지를 찾을 수 없습니다.");
+  const atts=(msg?.attachments||[]).filter(isImageAttachment_).slice(0,4);if(!atts.length)throw new Error("원본 메시지에서 이미지를 찾을 수 없습니다.");
   const images=[];for(const a of atts)images.push(await discordImageToInline(a));
   const check=await apiCall(env,discordGuildId,"screenshot_analyze",{event_id:eventId,images,source_message_id:String(msg.id),source_channel_id:String(channelId),discord_user_id:String(msg.author?.id||"")});
   await sendScreenshotResultReply(env,discordGuildId,channelId,msg.id,check);return check;
 }
+async function screenshotDiagnostic_(env,discordGuildId){
+  const cron=await cacheGet(`shotcron:${discordGuildId}`),channels=await screenshotWatchChannelIds(env,discordGuildId);
+  let recentImages=0,lastImageId="",readError="";
+  for(const ch of channels.slice(0,6)){
+    try{
+      const msgs=await getRecentChannelMessages(env,ch,20);
+      for(const m of msgs){if(m?.author?.bot)continue;if((m.attachments||[]).some(isImageAttachment_)){recentImages++;if(!lastImageId)lastImageId=String(m.id||"");}}
+    }catch(e){readError=String(e?.message||e);break;}
+  }
+  return {cron_at:String(cron?.at||""),channel_count:channels.length,recent_images:recentImages,last_image_id:lastImageId,read_error:readError};
+}
 async function pollAttendanceScreenshots(env,discordGuildId){
-  const channels=await screenshotWatchChannelIds(env,discordGuildId);if(!channels.length)return;const cutoff=Date.now()-30*60000;
-  for(const ch of channels){let messages;try{messages=await getRecentChannelMessages(env,ch,30);}catch(e){console.log("screenshot messages error",ch,e.message);continue;}
+  await cachePut(`shotcron:${discordGuildId}`,{at:new Date().toISOString()},300);
+  const channels=await screenshotWatchChannelIds(env,discordGuildId);if(!channels.length){console.log("screenshot poll: no watch channels",discordGuildId);return;}const cutoff=Date.now()-60*60000;
+  for(const ch of channels){let messages;try{messages=await getRecentChannelMessages(env,ch,30);}catch(e){console.log("screenshot messages error",ch,e.message);const key=`shotreaderr:${ch}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`⚠️ GuildCore 스샷 자동감지가 이 채널의 최근 메시지를 읽지 못했습니다.\n${String(e.message||e).slice(0,1000)}`});await cachePut(key,{sent:true},3600);}catch(_){}}continue;}
     for(const msg of messages.reverse()){
       if(msg?.author?.bot)continue;const ts=new Date(msg.timestamp||0).getTime();if(!ts||ts<cutoff)continue;
-      const atts=(msg.attachments||[]).filter(a=>String(a.content_type||"").startsWith("image/")).slice(0,4);if(!atts.length)continue;
+      const atts=(msg.attachments||[]).filter(isImageAttachment_).slice(0,4);if(!atts.length)continue;
       const replyId=String(msg.message_reference?.message_id||msg.referenced_message?.id||"");
-      let resolved;try{resolved=await apiCall(env,discordGuildId,"screenshot_resolve",{source_message_id:String(msg.id),source_channel_id:String(ch),reply_message_id:replyId,message_text:String(msg.content||"")});}catch(e){console.log("screenshot resolve error",msg.id,e.message);continue;}
+      let resolved;try{resolved=await apiCall(env,discordGuildId,"screenshot_resolve",{source_message_id:String(msg.id),source_channel_id:String(ch),reply_message_id:replyId,message_text:String(msg.content||"")});}catch(e){console.log("screenshot resolve error",msg.id,e.message);const key=`shotresolveerr:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`❌ 스크린샷은 감지했지만 보스 회차 확인에 실패했습니다.\n${String(e.message||e).slice(0,1200)}`,message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}continue;}
       if(resolved?.processed){if(resolved.needs_reply&&resolved.check){try{await sendScreenshotResultReply(env,discordGuildId,ch,msg.id,resolved.check);}catch(e){console.log("screenshot reply retry error",e.message)}}continue;}
       if(resolved?.requires_boss_name){const key=`shotwarn:${msg.id}`;if(!(await cacheGet(key))){try{const payload=screenshotPickPayload(resolved.candidates||[],msg.id);payload.message_reference={message_id:String(msg.id),fail_if_not_exists:false};await sendChannelMessage(env,ch,payload);await cachePut(key,{sent:true},1800);}catch(e){console.log("screenshot ambiguous reply error",e.message)}}continue;}
-      if(resolved?.no_event||!resolved?.event_id)continue;
+      if(resolved?.no_event||!resolved?.event_id){const key=`shotnoevent:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`⚠️ 스크린샷은 감지했지만 연결할 보스 회차를 찾지 못했습니다.\n보스 출석 메시지에 **답장으로 스크린샷을 올리면** 해당 회차로 정확히 연결됩니다.`,message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}continue;}
       try{await analyzeDiscordScreenshotMessage(env,discordGuildId,ch,msg,resolved.event_id);}catch(e){const key=`shoterr:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`❌ 스크린샷 분석 실패: ${e.message}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}}
     }
   }
@@ -1166,7 +1190,17 @@ async function handleCommandAsync(interaction, env) {
     await clearBossCache();
     return {content:`✅ Discord 서버 연결을 해제했습니다.${r.alliance_name?`\n기존 연합: ${r.alliance_name}`:""}`};
   }
-  if (name === "핑") { const h=await apiCall(env,discordGuildId,"health"); return {content:`✅ GuildCore 정상 연결\n연합: ${h.alliance_id}`}; }
+  if (name === "핑") {
+    const h=await apiCall(env,discordGuildId,"health");
+    let diagLine="";
+    try{
+      const sd=await screenshotDiagnostic_(env,discordGuildId);
+      const cronText=sd.cron_at?`${new Date(new Date(sd.cron_at).getTime()+9*3600000).toISOString().slice(5,16).replace("T"," ")} KST`:"최근 실행 기록 없음";
+      diagLine=`\n📸 스샷자동감지: 감시채널 ${sd.channel_count}개 · 최근 이미지 ${sd.recent_images}개 · Cron ${cronText}`;
+      if(sd.read_error)diagLine+=`\n⚠️ 메시지조회: ${sd.read_error.slice(0,500)}`;
+    }catch(e){diagLine=`\n⚠️ 스샷진단 실패: ${String(e?.message||e).slice(0,500)}`;}
+    return {content:`✅ GuildCore 정상 연결\n연합: ${h.alliance_id}${diagLine}`};
+  }
   if (name === "도움") return {content:discordHelpContent()};
   if (name === "초기설정") return await runInitialSetup(interaction, env);
   if (name === "동기화") {
@@ -1548,7 +1582,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.26 SCREENSHOT REPLY SYNC OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.27 SCREENSHOT JSON+AUTO DIAG OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
