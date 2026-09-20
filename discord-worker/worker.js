@@ -1027,19 +1027,30 @@ function attendanceContent(data) {
 
 
 function screenshotNames(rows){return (rows||[]).map(x=>String(x?.nickname||x?.text||x?.member_id||"")).filter(Boolean).join(" · ")||"-";}
+function screenshotGuildLines(rows){
+  const groups={};
+  for(const x of rows||[]){const key=(x?.server_name?String(x.server_name)+" / ":"")+String(x?.guild_name||"기타");(groups[key]||(groups[key]=[])).push(x);}
+  return Object.keys(groups).sort((a,b)=>a.localeCompare(b,"ko")).map(k=>`  [${k}] ${screenshotNames(groups[k])}`).join("\n")||"  -";
+}
 function screenshotResultContent(r,extra=""){
   if(!r||r.empty)return `📸 **${r?.boss_name||"보탐"} 스크린샷 대조**
 저장된 대조 결과가 없습니다.`;
   const m=r.matched||[],so=r.screenshot_only||[],ao=r.attendance_only||[],u=r.uncertain||[];
+  const scopeLine=r.server_name?`대상 ${r.server_name} · 길드별 구분`:`월드 · 서버/길드별 구분`;
   return (`📸 **${r.boss_name||"보탐"} 스크린샷 대조**
+`+
+    `${scopeLine}
 `+
     `누적 스샷 확인 ${Number(r.recognized_count||0)}명 · 분석 ${Number(r.check_count||1)}회${r.created_at_display?` · ${r.created_at_display}`:""}
 `+
-    `✅ 스샷 확인 + 출석 ${m.length}명 · ${screenshotNames(m)}
+    `✅ 스샷 확인 + 출석 ${m.length}명
+${screenshotGuildLines(m)}
 `+
-    `➕ 스샷 확인 + 미출석 ${so.length}명 · ${screenshotNames(so)}
+    `➕ 스샷 확인 + 미출석 ${so.length}명
+${screenshotGuildLines(so)}
 `+
-    `🔎 출석됨 · 회차 스샷 누적 미확인 ${ao.length}명 · ${screenshotNames(ao)}
+    `🔎 출석됨 · 회차 스샷 누적 미확인 ${ao.length}명
+${screenshotGuildLines(ao)}
 `+
     `❓ 이번 분석 후보/불확실 ${u.length}명 · ${screenshotNames(u)}`+
     (extra?`
@@ -1603,7 +1614,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.29 CUMULATIVE SCREENSHOT OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.30 GUILD GROUP + 3PASS OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
