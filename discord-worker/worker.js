@@ -1028,18 +1028,25 @@ function attendanceContent(data) {
 
 function screenshotNames(rows){return (rows||[]).map(x=>String(x?.nickname||x?.text||x?.member_id||"")).filter(Boolean).join(" · ")||"-";}
 function screenshotResultContent(r,extra=""){
-  if(!r||r.empty)return `📸 **${r?.boss_name||"보탐"} 스크린샷 대조**\n저장된 대조 결과가 없습니다.`;
+  if(!r||r.empty)return `📸 **${r?.boss_name||"보탐"} 스크린샷 대조**
+저장된 대조 결과가 없습니다.`;
   const m=r.matched||[],so=r.screenshot_only||[],ao=r.attendance_only||[],u=r.uncertain||[];
-  return (`📸 **${r.boss_name||"보탐"} 스크린샷 대조**\n`+
-    `인식 ${Number(r.recognized_count||0)}명${r.created_at_display?` · ${r.created_at_display}`:""}\n`+
-    `✅ 일치 ${m.length}명 · ${screenshotNames(m)}\n`+
-    `➕ 스샷에만 있음 ${so.length}명 · ${screenshotNames(so)}\n`+
-    `⚠️ 출석에만 있음 ${ao.length}명 · ${screenshotNames(ao)}\n`+
-    `❓ 인식 불확실 ${u.length}명 · ${screenshotNames(u)}`+
-    (extra?`\n${extra}`:"")).slice(0,1950);
+  return (`📸 **${r.boss_name||"보탐"} 스크린샷 대조**
+`+
+    `누적 스샷 확인 ${Number(r.recognized_count||0)}명 · 분석 ${Number(r.check_count||1)}회${r.created_at_display?` · ${r.created_at_display}`:""}
+`+
+    `✅ 스샷 확인 + 출석 ${m.length}명 · ${screenshotNames(m)}
+`+
+    `➕ 스샷 확인 + 미출석 ${so.length}명 · ${screenshotNames(so)}
+`+
+    `🔎 출석됨 · 회차 스샷 누적 미확인 ${ao.length}명 · ${screenshotNames(ao)}
+`+
+    `❓ 이번 분석 후보/불확실 ${u.length}명 · ${screenshotNames(u)}`+
+    (extra?`
+${extra}`:"")).slice(0,1950);
 }
 function screenshotResultPayload(r,extra=""){
-  const comps=(!r?.empty&&(r?.screenshot_only||[]).length&&r?.check_id)?[{type:1,components:[{type:2,style:3,label:`스샷 누락자 참여추가 (${r.screenshot_only.length}명)`,custom_id:`shotapply:${r.check_id}`}]}]:[];
+  const comps=(!r?.empty&&(r?.screenshot_only||[]).length&&r?.check_id)?[{type:1,components:[{type:2,style:3,label:`스샷 확인·미출석 참여추가 (${r.screenshot_only.length}명)`,custom_id:`shotapply:${r.check_id}`}]}]:[];
   return {content:screenshotResultContent(r,extra),components:comps};
 }
 async function syncAttendanceEventNow(env,discordGuildId,eventId,allianceId=""){
@@ -1596,7 +1603,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.28 DELETE SYNC OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.29 CUMULATIVE SCREENSHOT OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
