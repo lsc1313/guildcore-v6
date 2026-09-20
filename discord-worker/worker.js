@@ -84,8 +84,8 @@ function commands() {
     { name:"등록", type:1, description:"길드를 선택하고 게임 닉네임을 등록하거나 다시 등록합니다." },
     { name:"웹핀", type:1, description:"웹 로그인용 10분·1회용 셀프 PIN을 발급합니다." },
     { name:"보스확인", type:1, description:"월드보스와 내 서버 보스의 컷/예정 시간을 확인합니다." },
-    { name:"컷", type:1, description:"보스 컷을 등록합니다. 시각 생략 시 지금 컷입니다.", options:[{name:"보스",description:"컷한 보스",type:3,required:true,autocomplete:true},{name:"시각",description:"지난 컷이면 HH:MM",type:3,required:false}] },
-    { name:"젠", type:1, description:"다음 젠 시각을 지정하거나 제거합니다.", options:[{name:"보스",description:"보스",type:3,required:true,autocomplete:true},{name:"시각",description:"HH:MM · 생략하면 제거",type:3,required:false}] },
+    { name:"컷", type:1, description:"보스 컷을 등록합니다. 시각 생략 시 지금 컷입니다.", options:[{name:"보스",description:"컷한 보스",type:3,required:true,autocomplete:true},{name:"시각",description:"지난 컷이면 HH:MM 또는 HHMM",type:3,required:false}] },
+    { name:"젠", type:1, description:"다음 젠 시각을 지정하거나 제거합니다.", options:[{name:"보스",description:"보스",type:3,required:true,autocomplete:true},{name:"시각",description:"HH:MM 또는 HHMM · 생략하면 제거",type:3,required:false}] },
     { name:"보스등록", type:1, description:"월드/서버 보스를 등록합니다. 연합운영진 이상.", options:[
       {name:"이름",description:"보스명",type:3,required:true},
       {name:"범위",description:"월드 또는 서버",type:3,required:true,choices:[choice("월드","WORLD"),choice("서버","SERVER")]},
@@ -951,6 +951,7 @@ function discordHelpContent() {
     "",
     "**기본/보스**",
     "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석`",
+    "`/컷`, `/젠` 시각은 `00:00` 또는 `0000` 형식 모두 사용 가능",
     "`/출석종료` · `/참여삭제`",
     "",
     "**보스 설정 · 연합운영진+**",
@@ -1450,7 +1451,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.14 SERVER GUILD AUTO SYNC OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.23 COMMAND SYNC HHMM OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
