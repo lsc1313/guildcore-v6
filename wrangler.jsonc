@@ -2,10 +2,12 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "guildcore-v6",
   "main": "worker.js",
-  "compatibility_date": "2026-09-18",
-  "keep_vars": true,
+  "compatibility_date": "2026-09-19",
   "observability": {
     "enabled": true
+  },
+  "ai": {
+    "binding": "AI"
   },
   "d1_databases": [
     {
@@ -13,10 +15,5 @@
       "database_name": "guildcore-v6",
       "database_id": "63ac1865-8993-40db-96ec-dd8c8641245d"
     }
-  ],
-  "triggers": {
-    "crons": [
-      "* * * * *"
-    ]
-  }
+  ]
 }
