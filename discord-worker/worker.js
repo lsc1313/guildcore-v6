@@ -972,7 +972,7 @@ function discordHelpContent() {
     "`/서버연결` · `/서버연결해제` · `/보스알림채널설정` · `/출석채널설정` · `/보스알림테스트`",
     "",
     "보스 출석은 컷 후 10분에 자동 종료되며 운영진이 먼저 종료할 수도 있습니다.",
-    "출석 채널에 보탐 스크린샷을 올리면 약 1분 안에 자동 분석·대조합니다. 열린 출석이 여러 개면 이미지 메시지에 보스명을 함께 적어주세요."
+    "출석 메시지에 답장으로 보탐 스크린샷을 올리면 해당 보스 회차로 자동 연결됩니다. 그냥 올렸을 때 열린 회차가 여러 개면 보스 선택 버튼이 표시됩니다."
   ].join("\n");
 }
 
@@ -1068,26 +1068,43 @@ async function discordImageToInline(att){
 async function getRecentChannelMessages(env,channelId,limit=20){
   const r=await fetch(`https://discord.com/api/v10/channels/${channelId}/messages?limit=${Math.max(1,Math.min(50,limit))}`,{headers:botHeaders(env,false)});if(!r.ok)throw new Error(`Discord 메시지 조회 실패 ${r.status}: ${await r.text()}`);return r.json();
 }
+async function getChannelMessage(env,channelId,messageId){
+  const r=await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`,{headers:botHeaders(env,false)});if(!r.ok)throw new Error(`Discord 메시지 조회 실패 ${r.status}: ${await r.text()}`);return r.json();
+}
 function attendanceChannelIdsFromConfig(config){
   const ids=(config?.channels||[]).filter(x=>String(x.kind)==="attendance").map(x=>String(x.channel_id||"")).filter(Boolean);if(config?.discord_attendance_channel_id)ids.push(String(config.discord_attendance_channel_id));return [...new Set(ids)];
+}
+async function screenshotWatchChannelIds(env,discordGuildId){
+  try{const r=await apiCall(env,discordGuildId,"screenshot_watch_channels",{});const ids=Array.isArray(r?.channel_ids)?r.channel_ids.map(String).filter(Boolean):[];if(ids.length)return [...new Set(ids)];}catch(e){console.log("screenshot watch channels api error",discordGuildId,e.message)}
+  try{return attendanceChannelIdsFromConfig(await getConfig(env,discordGuildId));}catch{return []}
 }
 async function sendScreenshotResultReply(env,discordGuildId,channelId,sourceMessageId,check,allianceId=""){
   const payload=screenshotResultPayload(check);payload.message_reference={message_id:String(sourceMessageId),fail_if_not_exists:false};
   const msg=await sendChannelMessage(env,channelId,payload);if(msg?.id&&check?.check_id)await apiCall(env,discordGuildId,"screenshot_discord_reply_link",{check_id:check.check_id,result_message_id:msg.id},allianceId);return msg;
 }
+function screenshotPickPayload(candidates,sourceMessageId){
+  const list=(candidates||[]).slice(0,10),rows=[];
+  for(let i=0;i<list.length;i+=5){rows.push({type:1,components:list.slice(i,i+5).map(x=>({type:2,style:1,label:`${String(x.boss_name||"보스").slice(0,48)} ${String(x.cut_at||"").slice(-5)}`.trim().slice(0,80),custom_id:`shotpick:${x.event_id}:${sourceMessageId}`}))});}
+  return {content:`⚠️ 열린/최근 보스 회차가 여러 개라 스크린샷 대상을 자동 결정할 수 없습니다.\n아래에서 이 스크린샷의 보스를 선택하세요.`,components:rows};
+}
+async function analyzeDiscordScreenshotMessage(env,discordGuildId,channelId,msg,eventId){
+  const atts=(msg?.attachments||[]).filter(a=>String(a.content_type||"").startsWith("image/")).slice(0,4);if(!atts.length)throw new Error("원본 메시지에서 이미지를 찾을 수 없습니다.");
+  const images=[];for(const a of atts)images.push(await discordImageToInline(a));
+  const check=await apiCall(env,discordGuildId,"screenshot_analyze",{event_id:eventId,images,source_message_id:String(msg.id),source_channel_id:String(channelId),discord_user_id:String(msg.author?.id||"")});
+  await sendScreenshotResultReply(env,discordGuildId,channelId,msg.id,check);return check;
+}
 async function pollAttendanceScreenshots(env,discordGuildId){
-  let cfg;try{cfg=await getConfig(env,discordGuildId);}catch(e){console.log("screenshot config error",e.message);return;}
-  const channels=attendanceChannelIdsFromConfig(cfg);if(!channels.length)return;const cutoff=Date.now()-30*60000;
-  for(const ch of channels){let messages;try{messages=await getRecentChannelMessages(env,ch,20);}catch(e){console.log("screenshot messages error",ch,e.message);continue;}
+  const channels=await screenshotWatchChannelIds(env,discordGuildId);if(!channels.length)return;const cutoff=Date.now()-30*60000;
+  for(const ch of channels){let messages;try{messages=await getRecentChannelMessages(env,ch,30);}catch(e){console.log("screenshot messages error",ch,e.message);continue;}
     for(const msg of messages.reverse()){
       if(msg?.author?.bot)continue;const ts=new Date(msg.timestamp||0).getTime();if(!ts||ts<cutoff)continue;
       const atts=(msg.attachments||[]).filter(a=>String(a.content_type||"").startsWith("image/")).slice(0,4);if(!atts.length)continue;
-      let resolved;try{resolved=await apiCall(env,discordGuildId,"screenshot_resolve",{source_message_id:String(msg.id),source_channel_id:String(ch),message_text:String(msg.content||"")});}catch(e){console.log("screenshot resolve error",msg.id,e.message);continue;}
+      const replyId=String(msg.message_reference?.message_id||msg.referenced_message?.id||"");
+      let resolved;try{resolved=await apiCall(env,discordGuildId,"screenshot_resolve",{source_message_id:String(msg.id),source_channel_id:String(ch),reply_message_id:replyId,message_text:String(msg.content||"")});}catch(e){console.log("screenshot resolve error",msg.id,e.message);continue;}
       if(resolved?.processed){if(resolved.needs_reply&&resolved.check){try{await sendScreenshotResultReply(env,discordGuildId,ch,msg.id,resolved.check);}catch(e){console.log("screenshot reply retry error",e.message)}}continue;}
-      if(resolved?.requires_boss_name){const key=`shotwarn:${msg.id}`;if(!(await cacheGet(key))){const names=(resolved.candidates||[]).map(x=>x.boss_name).join(" · ");try{await sendChannelMessage(env,ch,{content:`⚠️ 스크린샷과 연결할 열린 보스가 여러 개입니다.\n이미지를 다시 올리면서 메시지에 보스명을 적어주세요.\n후보: ${names}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(e){console.log("screenshot ambiguous reply error",e.message)}}continue;}
+      if(resolved?.requires_boss_name){const key=`shotwarn:${msg.id}`;if(!(await cacheGet(key))){try{const payload=screenshotPickPayload(resolved.candidates||[],msg.id);payload.message_reference={message_id:String(msg.id),fail_if_not_exists:false};await sendChannelMessage(env,ch,payload);await cachePut(key,{sent:true},1800);}catch(e){console.log("screenshot ambiguous reply error",e.message)}}continue;}
       if(resolved?.no_event||!resolved?.event_id)continue;
-      const images=[];try{for(const a of atts)images.push(await discordImageToInline(a));}catch(e){console.log("screenshot image load error",msg.id,e.message);continue;}
-      try{const check=await apiCall(env,discordGuildId,"screenshot_analyze",{event_id:resolved.event_id,images,source_message_id:String(msg.id),source_channel_id:String(ch),discord_user_id:String(msg.author?.id||"")});await sendScreenshotResultReply(env,discordGuildId,ch,msg.id,check);}catch(e){const key=`shoterr:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`❌ 스크린샷 분석 실패: ${e.message}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}}
+      try{await analyzeDiscordScreenshotMessage(env,discordGuildId,ch,msg,resolved.event_id);}catch(e){const key=`shoterr:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`❌ 스크린샷 분석 실패: ${e.message}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}}
     }
   }
 }
@@ -1531,7 +1548,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.25 REALTIME + SCREENSHOT SYNC OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.26 SCREENSHOT REPLY SYNC OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
@@ -1576,6 +1593,19 @@ export default {
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleAttendanceButton(interaction, env, attended)); }
         catch (e) { console.log("attendance button error", e.message); }
+      })());
+      return Response.json({type:6});
+    }
+
+    if (interaction.type === 3 && String(interaction.data?.custom_id || "").startsWith("shotpick:")) {
+      ctx.waitUntil((async()=>{
+        try{
+          const parts=String(interaction.data.custom_id||"").split(":"),eventId=parts[1]||"",sourceId=parts[2]||"",channelId=String(interaction.channel_id||"");
+          if(!eventId||!sourceId||!channelId)throw new Error("스크린샷 선택 정보가 올바르지 않습니다.");
+          const source=await getChannelMessage(env,channelId,sourceId);
+          const check=await analyzeDiscordScreenshotMessage(env,interaction.guild_id,channelId,source,eventId);
+          await editOriginal(interaction,{content:`✅ ${check.boss_name||"보스"} 회차로 연결해 스크린샷 대조를 완료했습니다.`,components:[]});
+        }catch(e){await editOriginal(interaction,{content:`❌ ${e.message}`,components:[]});}
       })());
       return Response.json({type:6});
     }
