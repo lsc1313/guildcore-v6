@@ -108,6 +108,7 @@ function commands() {
     { name:"출석종료", type:1, description:"진행 중인 보스 출석을 즉시 종료합니다.", options:[{name:"보스",description:"출석 종료할 보스",type:3,required:true,autocomplete:true}] },
     { name:"참여삭제", type:1, description:"잘못 참여 처리된 인원을 출석에서 제외합니다.", options:[{name:"보스",description:"진행 중인 보스",type:3,required:true,autocomplete:true},{name:"닉네임",description:"제외할 게임 닉네임",type:3,required:true}] },
     { name:"내출석", type:1, description:"내 월간 보스 출석을 확인합니다.", options:[{name:"월",description:"예: 2026-09",type:3,required:false}] },
+    { name:"보탐대조", type:1, description:"Discord/UI에서 분석한 최근 보탐 스크린샷 대조 결과를 확인합니다.", options:[{name:"보스",description:"보스명 · 생략 시 최근 결과",type:3,required:false,autocomplete:true}] },
     { name:"연합공지", type:1, description:"연합 공지를 등록합니다. 연합운영진 이상.", options:[{name:"제목",description:"공지 제목",type:3,required:true},{name:"내용",description:"공지 내용",type:3,required:true},{name:"고정",description:"상단 고정",type:5,required:false}] },
     { name:"길드공지", type:1, description:"내 길드 공지를 등록합니다.", options:[{name:"제목",description:"공지 제목",type:3,required:true},{name:"내용",description:"공지 내용",type:3,required:true},{name:"고정",description:"상단 고정",type:5,required:false}] },
     { name:"공지확인", type:1, description:"연합 또는 길드 공지를 확인합니다.", options:[{name:"범위",description:"연합 또는 길드",type:3,required:true,choices:[choice("연합","alliance"),choice("길드","guild")]}] },
@@ -950,7 +951,7 @@ function discordHelpContent() {
     "📌 **GuildCore Discord 명령어**",
     "",
     "**기본/보스**",
-    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석`",
+    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석` · `/보탐대조`",
     "`/컷`, `/젠`은 등록된 길드원 모두 사용 가능 · 시각은 `00:00` 또는 `0000` 형식",
     "`/출석종료` · `/참여삭제`",
     "",
@@ -970,7 +971,8 @@ function discordHelpContent() {
     "`/참여체크생성 제목` → 연합 참여체크 채널에 쟁/행사 참여조사 생성",
     "`/서버연결` · `/서버연결해제` · `/보스알림채널설정` · `/출석채널설정` · `/보스알림테스트`",
     "",
-    "보스 출석은 컷 후 10분에 자동 종료되며 운영진이 먼저 종료할 수도 있습니다."
+    "보스 출석은 컷 후 10분에 자동 종료되며 운영진이 먼저 종료할 수도 있습니다.",
+    "출석 채널에 보탐 스크린샷을 올리면 약 1분 안에 자동 분석·대조합니다. 열린 출석이 여러 개면 이미지 메시지에 보스명을 함께 적어주세요."
   ].join("\n");
 }
 
@@ -1022,6 +1024,76 @@ function attendanceContent(data) {
 }
 
 
+
+
+function screenshotNames(rows){return (rows||[]).map(x=>String(x?.nickname||x?.text||x?.member_id||"")).filter(Boolean).join(" · ")||"-";}
+function screenshotResultContent(r,extra=""){
+  if(!r||r.empty)return `📸 **${r?.boss_name||"보탐"} 스크린샷 대조**\n저장된 대조 결과가 없습니다.`;
+  const m=r.matched||[],so=r.screenshot_only||[],ao=r.attendance_only||[],u=r.uncertain||[];
+  return (`📸 **${r.boss_name||"보탐"} 스크린샷 대조**\n`+
+    `인식 ${Number(r.recognized_count||0)}명${r.created_at_display?` · ${r.created_at_display}`:""}\n`+
+    `✅ 일치 ${m.length}명 · ${screenshotNames(m)}\n`+
+    `➕ 스샷에만 있음 ${so.length}명 · ${screenshotNames(so)}\n`+
+    `⚠️ 출석에만 있음 ${ao.length}명 · ${screenshotNames(ao)}\n`+
+    `❓ 인식 불확실 ${u.length}명 · ${screenshotNames(u)}`+
+    (extra?`\n${extra}`:"")).slice(0,1950);
+}
+function screenshotResultPayload(r,extra=""){
+  const comps=(!r?.empty&&(r?.screenshot_only||[]).length&&r?.check_id)?[{type:1,components:[{type:2,style:3,label:`스샷 누락자 참여추가 (${r.screenshot_only.length}명)`,custom_id:`shotapply:${r.check_id}`}]}]:[];
+  return {content:screenshotResultContent(r,extra),components:comps};
+}
+async function syncAttendanceEventNow(env,discordGuildId,eventId,allianceId=""){
+  if(!eventId)return false;
+  const list=await apiCall(env,discordGuildId,"attendance_list",{event_id:eventId},allianceId);
+  const links=Array.isArray(list.discord_message_links)?list.discord_message_links.filter(x=>x?.channel_id&&x?.message_id):[];
+  let edited=0;
+  for(const link of links){try{await editChannelMessage(env,String(link.channel_id),String(link.message_id),attendancePayload(list));edited++;}catch(e){console.log("attendance sync edit error",eventId,link.message_id,e.message)}}
+  if(edited)return true;
+  if(String(list.attendance_status||"open")!=="open")return false;
+  let targets=String(list.attendance_channel_ids||list.attendance_channel_id||"").split(",").map(x=>x.trim()).filter(Boolean);targets=[...new Set(targets)];
+  for(const ch of targets){try{const msg=await sendChannelMessage(env,ch,attendancePayload(list));if(msg?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:eventId,message_id:msg.id,channel_id:ch},allianceId);edited++;}catch(e){console.log("attendance sync create error",eventId,ch,e.message)}}
+  return edited>0;
+}
+async function flushAttendanceSync(env,discordGuildId){
+  let pulled;try{pulled=await apiCall(env,discordGuildId,"attendance_sync_pull",{limit:40});}catch(e){console.log("attendance sync pull error",discordGuildId,e.message);return;}
+  const done=[];for(const x of (pulled.events||[])){try{await syncAttendanceEventNow(env,discordGuildId,x.event_id);done.push(x.event_id);}catch(e){console.log("attendance sync error",discordGuildId,x.event_id,e.message)}}
+  if(done.length)try{await apiCall(env,discordGuildId,"attendance_sync_mark",{event_ids:done,status:"sent"});}catch(e){console.log("attendance sync mark error",e.message)}
+}
+function uint8ToBase64(bytes){let out="";const step=0x8000;for(let i=0;i<bytes.length;i+=step)out+=String.fromCharCode(...bytes.subarray(i,Math.min(bytes.length,i+step)));return btoa(out);}
+async function discordImageToInline(att){
+  const size=Number(att?.size||0);if(size>8*1024*1024)throw new Error("이미지 한 장은 8MB 이하여야 합니다.");
+  const r=await fetch(String(att.url||att.proxy_url||""));if(!r.ok)throw new Error(`이미지 다운로드 실패 ${r.status}`);const ab=await r.arrayBuffer();
+  return {name:String(att.filename||"screenshot"),mime_type:String(att.content_type||"image/jpeg").split(";")[0],data:uint8ToBase64(new Uint8Array(ab))};
+}
+async function getRecentChannelMessages(env,channelId,limit=20){
+  const r=await fetch(`https://discord.com/api/v10/channels/${channelId}/messages?limit=${Math.max(1,Math.min(50,limit))}`,{headers:botHeaders(env,false)});if(!r.ok)throw new Error(`Discord 메시지 조회 실패 ${r.status}: ${await r.text()}`);return r.json();
+}
+function attendanceChannelIdsFromConfig(config){
+  const ids=(config?.channels||[]).filter(x=>String(x.kind)==="attendance").map(x=>String(x.channel_id||"")).filter(Boolean);if(config?.discord_attendance_channel_id)ids.push(String(config.discord_attendance_channel_id));return [...new Set(ids)];
+}
+async function sendScreenshotResultReply(env,discordGuildId,channelId,sourceMessageId,check,allianceId=""){
+  const payload=screenshotResultPayload(check);payload.message_reference={message_id:String(sourceMessageId),fail_if_not_exists:false};
+  const msg=await sendChannelMessage(env,channelId,payload);if(msg?.id&&check?.check_id)await apiCall(env,discordGuildId,"screenshot_discord_reply_link",{check_id:check.check_id,result_message_id:msg.id},allianceId);return msg;
+}
+async function pollAttendanceScreenshots(env,discordGuildId){
+  let cfg;try{cfg=await getConfig(env,discordGuildId);}catch(e){console.log("screenshot config error",e.message);return;}
+  const channels=attendanceChannelIdsFromConfig(cfg);if(!channels.length)return;const cutoff=Date.now()-30*60000;
+  for(const ch of channels){let messages;try{messages=await getRecentChannelMessages(env,ch,20);}catch(e){console.log("screenshot messages error",ch,e.message);continue;}
+    for(const msg of messages.reverse()){
+      if(msg?.author?.bot)continue;const ts=new Date(msg.timestamp||0).getTime();if(!ts||ts<cutoff)continue;
+      const atts=(msg.attachments||[]).filter(a=>String(a.content_type||"").startsWith("image/")).slice(0,4);if(!atts.length)continue;
+      let resolved;try{resolved=await apiCall(env,discordGuildId,"screenshot_resolve",{source_message_id:String(msg.id),source_channel_id:String(ch),message_text:String(msg.content||"")});}catch(e){console.log("screenshot resolve error",msg.id,e.message);continue;}
+      if(resolved?.processed){if(resolved.needs_reply&&resolved.check){try{await sendScreenshotResultReply(env,discordGuildId,ch,msg.id,resolved.check);}catch(e){console.log("screenshot reply retry error",e.message)}}continue;}
+      if(resolved?.requires_boss_name){const key=`shotwarn:${msg.id}`;if(!(await cacheGet(key))){const names=(resolved.candidates||[]).map(x=>x.boss_name).join(" · ");try{await sendChannelMessage(env,ch,{content:`⚠️ 스크린샷과 연결할 열린 보스가 여러 개입니다.\n이미지를 다시 올리면서 메시지에 보스명을 적어주세요.\n후보: ${names}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(e){console.log("screenshot ambiguous reply error",e.message)}}continue;}
+      if(resolved?.no_event||!resolved?.event_id)continue;
+      const images=[];try{for(const a of atts)images.push(await discordImageToInline(a));}catch(e){console.log("screenshot image load error",msg.id,e.message);continue;}
+      try{const check=await apiCall(env,discordGuildId,"screenshot_analyze",{event_id:resolved.event_id,images,source_message_id:String(msg.id),source_channel_id:String(ch),discord_user_id:String(msg.author?.id||"")});await sendScreenshotResultReply(env,discordGuildId,ch,msg.id,check);}catch(e){const key=`shoterr:${msg.id}`;if(!(await cacheGet(key))){try{await sendChannelMessage(env,ch,{content:`❌ 스크린샷 분석 실패: ${e.message}`.slice(0,1900),message_reference:{message_id:String(msg.id),fail_if_not_exists:false}});await cachePut(key,{sent:true},1800);}catch(_){}}}
+    }
+  }
+}
+async function discordGuildIdsForAlliance(env,allianceId){
+  try{const r=await apiCall(env,"","discord_bound_servers",{});return (r.servers||[]).filter(x=>String(x.alliance_id||"")===String(allianceId||"")).map(x=>String(x.discord_server_id||"")).filter(Boolean);}catch(e){console.log("bound server lookup error",e.message);return []}
+}
 
 function bossListContent(bosses) {
   if (!bosses?.length) return "등록된 활성 보스가 없습니다.";
@@ -1170,15 +1242,17 @@ async function handleCommandAsync(interaction, env) {
   if (name === "보스제거") {const r=await apiCall(env,discordGuildId,"boss_disable",{...actor,boss:getOption(interaction,"보스")});await clearBossCache();return {content:`✅ ${r.boss_name} · ${r.message}`};}
   if (name === "출석종료") {
     const r=await apiCall(env,discordGuildId,"attendance_close",{...actor,boss:getOption(interaction,"보스")});
+    if(r.event_id)await syncAttendanceEventNow(env,discordGuildId,r.event_id);
     return {content:`✅ ${r.boss_name||"보스"} 출석 종료`};
   }
   if (name === "참여삭제") {
     const r=await apiCall(env,discordGuildId,"attendance_remove",{...actor,boss:getOption(interaction,"보스"),nickname:getOption(interaction,"닉네임")});
     const list=r.attendance||await apiCall(env,discordGuildId,"attendance_list",{event_id:r.event_id});
-    if(list.discord_message_id&&list.discord_channel_id) await editChannelMessage(env,list.discord_channel_id,list.discord_message_id,attendancePayload(list));
+    if(r.event_id)await syncAttendanceEventNow(env,discordGuildId,r.event_id);
     return {content:`✅ ${r.message}`};
   }
   if (name === "내출석") {const r=await apiCall(env,discordGuildId,"my_attendance",{...actor,month:getOption(interaction,"월")||""});return {content:`📊 **${r.month} 내 출석**\n참여 ${r.count}회 / 전체 ${r.total_events}회 · ${r.rate}%`};}
+  if (name === "보탐대조") {const r=await apiCall(env,discordGuildId,"screenshot_latest",{...actor,boss:getOption(interaction,"보스")||""});return screenshotResultPayload(r);}
 
   if (name === "연합공지") {const r=await apiCall(env,discordGuildId,"alliance_notice_add",{...actor,title:getOption(interaction,"제목"),content:getOption(interaction,"내용"),pinned:getOption(interaction,"고정")||false});return {content:`✅ ${r.message}`};}
   if (name === "길드공지") {const r=await apiCall(env,discordGuildId,"guild_notice_add",{...actor,title:getOption(interaction,"제목"),content:getOption(interaction,"내용"),pinned:getOption(interaction,"고정")||false});return {content:`✅ ${r.message}`};}
@@ -1318,7 +1392,8 @@ async function runDiscordCron(env){
       const config=await apiCall(env,discordGuildId,"config");
       await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false,forceMemberRoles:false});
     }catch(e){console.log("auto sync error",discordGuildId,e.message);}
-    await Promise.all([flushAlerts(env,discordGuildId),flushAttendanceResults(env,discordGuildId)]);
+    await Promise.all([flushAlerts(env,discordGuildId),flushAttendanceResults(env,discordGuildId),flushAttendanceSync(env,discordGuildId)]);
+    try{await pollAttendanceScreenshots(env,discordGuildId);}catch(e){console.log("screenshot poll error",discordGuildId,e.message);}
   }
 }
 
@@ -1411,6 +1486,10 @@ async function handleKakaoHttp(request, env) {
     allianceId
   );
 
+  if(data&&data.sync_attendance&&data.event_id){
+    const guildIds=await discordGuildIdsForAlliance(env,allianceId);
+    for(const gid of guildIds){try{await syncAttendanceEventNow(env,gid,data.event_id,allianceId);}catch(e){console.log("kakao attendance discord sync error",gid,data.event_id,e.message)}}
+  }
   return Response.json({ ok:true, data });
 }
 
@@ -1452,7 +1531,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.24 BOSS PERMISSION SYNC OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.25 REALTIME + SCREENSHOT SYNC OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
@@ -1501,6 +1580,19 @@ export default {
       return Response.json({type:6});
     }
 
+    if (interaction.type === 3 && String(interaction.data?.custom_id || "").startsWith("shotapply:")) {
+      ctx.waitUntil((async()=>{
+        try{
+          const checkId=String(interaction.data.custom_id||"").split(":")[1]||"",userId=interaction.member?.user?.id||"";
+          const r=await apiCall(env,interaction.guild_id,"screenshot_apply_missing",{discord_user_id:userId,check_id:checkId});
+          if(r.event_id)await syncAttendanceEventNow(env,interaction.guild_id,r.event_id);
+          const latest=await apiCall(env,interaction.guild_id,"screenshot_latest",{discord_user_id:userId,event_id:r.event_id});
+          await editOriginal(interaction,screenshotResultPayload(latest,`✅ 참여 ${r.added||0}명 반영 완료`));
+        }catch(e){await editOriginal(interaction,{content:`❌ ${e.message}`,components:[]});}
+      })());
+      return Response.json({type:6});
+    }
+
     if (interaction.type === 3 && String(interaction.data?.custom_id || "").startsWith("pclose:")) {
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleParticipationCloseButton(interaction, env)); }
@@ -1510,7 +1602,7 @@ export default {
     }
 
     if (interaction.type === 2) {
-      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","웹핀","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
+      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","웹핀","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보탐대조","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
       const ephemeral = ephemeralNames.has(interaction.data?.name);
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleCommandAsync(interaction, env)); }
