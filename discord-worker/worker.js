@@ -86,7 +86,7 @@ function commands() {
     { name:"보스확인", type:1, description:"월드보스와 내 서버 보스의 컷/예정 시간을 확인합니다." },
     { name:"컷", type:1, description:"보스 컷을 등록합니다. 시각 생략 시 지금 컷입니다.", options:[{name:"보스",description:"컷한 보스",type:3,required:true,autocomplete:true},{name:"시각",description:"지난 컷이면 HH:MM 또는 HHMM",type:3,required:false}] },
     { name:"젠", type:1, description:"다음 젠 시각을 지정하거나 제거합니다.", options:[{name:"보스",description:"보스",type:3,required:true,autocomplete:true},{name:"시각",description:"HH:MM 또는 HHMM · 생략하면 제거",type:3,required:false}] },
-    { name:"보스등록", type:1, description:"월드/서버 보스를 등록합니다. 연합운영진 이상.", options:[
+    { name:"보스등록", type:1, description:"월드=연합운영진+, 서버=해당 서버 길드운영진+ 등록 가능.", options:[
       {name:"이름",description:"보스명",type:3,required:true},
       {name:"범위",description:"월드 또는 서버",type:3,required:true,choices:[choice("월드","WORLD"),choice("서버","SERVER")]},
       {name:"유형",description:"쿨타임/매일고정/요일고정",type:3,required:true,choices:[choice("쿨타임","cooldown"),choice("매일 고정","fixed"),choice("요일 고정","weekly")]},
@@ -94,7 +94,7 @@ function commands() {
       {name:"서버",description:"서버보스면 선택",type:3,required:false,autocomplete:true},
       {name:"출석",description:"출석 사용 여부",type:5,required:false}
     ]},
-    { name:"보스수정", type:1, description:"보스 설정을 수정합니다. 연합운영진 이상.", options:[
+    { name:"보스수정", type:1, description:"월드=연합운영진+, 서버=해당 서버 길드운영진+ 수정 가능.", options:[
       {name:"보스",description:"수정할 보스",type:3,required:true,autocomplete:true},
       {name:"새이름",description:"새 보스명",type:3,required:false},
       {name:"범위",description:"월드 또는 서버",type:3,required:false,choices:[choice("월드","WORLD"),choice("서버","SERVER")]},
@@ -104,7 +104,7 @@ function commands() {
       {name:"출석",description:"출석 사용 여부",type:5,required:false},
       {name:"알림",description:"10·5·1분/젠 알림 전체",type:5,required:false}
     ]},
-    { name:"보스제거", type:1, description:"보스를 비활성화합니다. 연합운영진 이상.", options:[{name:"보스",description:"비활성화할 보스",type:3,required:true,autocomplete:true}] },
+    { name:"보스제거", type:1, description:"월드=연합운영진+, 서버=해당 서버 길드운영진+ 제거 가능.", options:[{name:"보스",description:"비활성화할 보스",type:3,required:true,autocomplete:true}] },
     { name:"출석종료", type:1, description:"진행 중인 보스 출석을 즉시 종료합니다.", options:[{name:"보스",description:"출석 종료할 보스",type:3,required:true,autocomplete:true}] },
     { name:"참여삭제", type:1, description:"잘못 참여 처리된 인원을 출석에서 제외합니다.", options:[{name:"보스",description:"진행 중인 보스",type:3,required:true,autocomplete:true},{name:"닉네임",description:"제외할 게임 닉네임",type:3,required:true}] },
     { name:"내출석", type:1, description:"내 월간 보스 출석을 확인합니다.", options:[{name:"월",description:"예: 2026-09",type:3,required:false}] },
@@ -951,10 +951,11 @@ function discordHelpContent() {
     "",
     "**기본/보스**",
     "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석`",
-    "`/컷`, `/젠` 시각은 `00:00` 또는 `0000` 형식 모두 사용 가능",
+    "`/컷`, `/젠`은 등록된 길드원 모두 사용 가능 · 시각은 `00:00` 또는 `0000` 형식",
     "`/출석종료` · `/참여삭제`",
     "",
-    "**보스 설정 · 연합운영진+**",
+    "**보스 설정**",
+    "월드보스: 연합장/연합운영진 · 서버보스: 해당 서버 길드장/부길드장/길드운영진도 가능",
     "`/보스등록` · `/보스수정` · `/보스제거`",
     "",
     "**공지/길드**",
@@ -1451,7 +1452,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.23 COMMAND SYNC HHMM OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.24 BOSS PERMISSION SYNC OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
