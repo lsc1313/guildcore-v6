@@ -1176,9 +1176,13 @@ function bossListContent(bosses) {
     const key = String(b.boss_scope||"WORLD") === "WORLD" ? "월드" : String(b.server_name||"서버");
     (groups[key]||(groups[key]=[])).push(b);
   });
-  const keys = Object.keys(groups).sort((a,b)=>a==="월드"?-1:(b==="월드"?1:a.localeCompare(b,"ko")));
+  const keys = Object.keys(groups).sort((a,b)=>a==="월드"?1:(b==="월드"?-1:a.localeCompare(b,"ko",{numeric:true})));
   return keys.map(k=>{
-    const rows = groups[k].sort((a,b)=>String(a.next_spawn_at||"9999").localeCompare(String(b.next_spawn_at||"9999"))).map(b=>`${b.boss_name} · 컷 ${hhmm(b.last_kill_at)} · 예정 ${hhmm(b.next_spawn_at)}`);
+    const rows = groups[k].sort((a,b)=>{
+      const av=String(a.next_spawn_at||"9999-12-31 23:59"),bv=String(b.next_spawn_at||"9999-12-31 23:59");
+      const c=av.localeCompare(bv);
+      return c||String(a.boss_name||"").localeCompare(String(b.boss_name||""),"ko");
+    }).map(b=>`${b.boss_name} · 컷 ${hhmm(b.last_kill_at)} · 예정 ${hhmm(b.next_spawn_at)}`);
     return `**[${k}]**\n${rows.join("\n")}`;
   }).join("\n\n").slice(0,1950);
 }
@@ -1614,7 +1618,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.30 GUILD GROUP + 3PASS OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.31 BOSS SORT OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
