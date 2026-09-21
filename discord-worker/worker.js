@@ -987,9 +987,14 @@ function manualParticipationComponents(eventId){
   ]}];
 }
 
+function participantSourceText(p){
+  const labels=Array.isArray(p?.source_labels)?p.source_labels:[];
+  return labels.length?` [${labels.join("+")}]`:"";
+}
+function participantDisplay(p){return `${String(p?.nickname||"")}${participantSourceText(p)}`;}
 function manualParticipationContent(data){
   const people=data?.participants||[],groups={};
-  people.forEach(p=>{const k=String(p.guild_name||"미등록 길드");(groups[k]||(groups[k]=[])).push(String(p.nickname||""));});
+  people.forEach(p=>{const k=String(p.guild_name||"미등록 길드");(groups[k]||(groups[k]=[])).push(participantDisplay(p));});
   const body=Object.keys(groups).sort().map(k=>`[${k}] ${groups[k].filter(Boolean).join(" · ")}`).join("\n")||"아직 참여자가 없습니다.";
   const closed=String(data?.attendance_status||"open")!=="open";
   return `⚔️ **${data.boss_name||"참여조사"}**\n${closed?"참여체크 종료":"참여조사 진행 중"} · 참여 ${people.length}명\n\n${body}`.slice(0,1950);
@@ -1010,12 +1015,12 @@ function attendanceComponents(eventId) {
 function attendanceContent(data) {
   const people = data?.participants || [];
   const hhmm = v => v ? String(v).slice(-5) : "-";
-  const names = people.map(p=>String(p.nickname||"")).filter(Boolean);
+  const names = people.map(participantDisplay).filter(Boolean);
   let body = names.length ? names.join(" · ") : "아직 참여자가 없습니다.";
   if (String(data?.attendance_status || "open") !== "open") {
-    if (String(data?.boss_scope || "WORLD") === "WORLD" && people.length) {
+    if (people.length) {
       const groups = {};
-      people.forEach(p=>{ const k=String(p.server_name||"서버"); (groups[k]||(groups[k]=[])).push(String(p.nickname||"")); });
+      people.forEach(p=>{ const k=(String(data?.boss_scope||"WORLD")==="WORLD"?(String(p.server_name||"서버")+" / "):"")+String(p.guild_name||"길드"); (groups[k]||(groups[k]=[])).push(participantDisplay(p)); });
       body = Object.keys(groups).sort().map(k=>`[${k}] ${groups[k].filter(Boolean).join(" · ")}`).join("\n") || body;
     }
     return `${data.boss_name}\n컷 ${hhmm(data.cut_at)}\n예정 ${hhmm(data.next_spawn_at)}\n출석 종료 · 참여 ${people.length}명${body ? `\n\n${body}` : ""}`.slice(0,1950);
@@ -1618,7 +1623,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.31 BOSS SORT OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.32 ATTENDANCE SOURCE OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
