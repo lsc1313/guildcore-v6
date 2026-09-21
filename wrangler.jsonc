@@ -16,5 +16,8 @@
       "database_id": "63ac1865-8993-40db-96ec-dd8c8641245d"
     }
   ],
-  "keep_vars": true
+  "keep_vars": true,
+  "ai": {
+    "binding": "AI"
+  }
 }
