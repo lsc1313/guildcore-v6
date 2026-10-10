@@ -1793,13 +1793,22 @@ async function botMarkAttendanceResults_(env,aid,p){const target=String(p.target
 function botBossNextLabel_(b){
   const next=String(b?.next_spawn_at||"");
   if(!next)return "-";
-  if(String(b?.boss_type||"").toLowerCase()==="weekly"){
+  const type=String(b?.boss_type||"").toLowerCase();
+  if(type==="weekly"){
     const m=String(b?.fixed_times||"").trim().toUpperCase().match(/^(SUN|MON|TUE|WED|THU|FRI|SAT)@(\d{2}):(\d{2})$/);
     if(m){
       const names={SUN:"일요일",MON:"월요일",TUE:"화요일",WED:"수요일",THU:"목요일",FRI:"금요일",SAT:"토요일"};
       const hh=String(Number(m[2])).padStart(2,"0");
       const mm=String(Number(m[3])).padStart(2,"0");
       return names[m[1]]+" "+hh+"시"+(mm!=="00"?" "+mm+"분":"");
+    }
+  }
+  if(type==="fixed"){
+    const hm=next.slice(-5).match(/^(\d{2}):(\d{2})$/);
+    if(hm){
+      const hh=String(Number(hm[1])).padStart(2,"0");
+      const mm=String(Number(hm[2])).padStart(2,"0");
+      return "매일고정 "+hh+"시"+(mm!=="00"?" "+mm+"분":"");
     }
   }
   return next.slice(-5);
