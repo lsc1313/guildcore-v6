@@ -75,6 +75,7 @@ function commands() {
     { name:"도움", type:1, description:"GuildCore 명령어 목록을 채팅창에 표시합니다." },
     { name:"초기설정", type:1, description:"연합 연결 후 서버/길드 구조를 자동 구성합니다.", options:[{name:"연합",description:"연결할 GuildCore 연합",type:3,required:true,autocomplete:true}] },
     { name:"동기화", type:1, description:"GuildCore 서버/길드 구조를 Discord에 즉시 동기화합니다." },
+    { name:"초기화", type:1, description:"GuildCore Discord 채널 구조를 정리하고 중복 없이 다시 구성합니다.", options:[{name:"확인",description:"초기화를 실행하려면 켜세요.",type:5,required:true}] },
     { name:"참여체크생성", type:1, description:"연합 참여조사를 생성합니다. 연합운영진 이상.", options:[{name:"제목",description:"예: 00 쟁 참여조사",type:3,required:true,max_length:80}] },
     { name:"서버연결", type:1, description:"현재 Discord 서버를 GuildCore 연합에 연결합니다.", options:[{name:"연합",description:"연결할 활성 연합",type:3,required:true,autocomplete:true}] },
     { name:"서버연결해제", type:1, description:"현재 Discord 서버와 연합 연결을 해제합니다." },
@@ -604,35 +605,135 @@ async function cleanupEmptyDefaultServer(env,discordGuildId,channels,serverName,
 }
 
 async function ensureNamedCategory(env,guildId,channels,name,overwrites=[]){
-  let c=channels.find(x=>Number(x.type)===4&&normalizeManagedName(x.name)===normalizeManagedName(name));
+  const norm=normalizeManagedName(name);
+  let c=channels.find(x=>Number(x.type)===4&&normalizeManagedName(x.name)===norm);
   if(!c){
-    c=await createDiscordChannel(env,guildId,{name,type:4,permission_overwrites:overwrites});
-    channels.push(c);
-  }else{
-    c=await patchDiscordChannel(env,c.id,{name,permission_overwrites:overwrites});
-    const i=channels.findIndex(x=>String(x.id)===String(c.id));if(i>=0)channels[i]=c;
+    const fresh=await getChannels(env,guildId);
+    c=fresh.find(x=>Number(x.type)===4&&normalizeManagedName(x.name)===norm);
+    if(c){if(!channels.some(x=>String(x.id)===String(c.id)))channels.push(c);}
+    else{c=await createDiscordChannel(env,guildId,{name,type:4,permission_overwrites:overwrites});channels.push(c);}
   }
+  c=await patchDiscordChannel(env,c.id,{name,permission_overwrites:overwrites});
+  const i=channels.findIndex(x=>String(x.id)===String(c.id));if(i>=0)channels[i]=c;
   return c;
 }
 
 async function ensureNamedChannel(env,guildId,channels,{name,type=0,parent_id=null,topic="",permission_overwrites=[]}){
-  let c=channels.find(x=>Number(x.type)===Number(type)&&normalizeManagedName(x.name)===normalizeManagedName(name)&&String(x.parent_id||"")===String(parent_id||""));
+  const norm=normalizeManagedName(name),parent=String(parent_id||"");
+  let c=channels.find(x=>Number(x.type)===Number(type)&&normalizeManagedName(x.name)===norm&&String(x.parent_id||"")===parent);
   const payload={name,permission_overwrites};
   if(parent_id)payload.parent_id=parent_id;
   if(type===0)payload.topic=topic||"";
   if(!c){
-    c=await createDiscordChannel(env,guildId,{name,type,...payload});
-    channels.push(c);
-  }else{
-    c=await patchDiscordChannel(env,c.id,payload);
-    const i=channels.findIndex(x=>String(x.id)===String(c.id));if(i>=0)channels[i]=c;
+    const fresh=await getChannels(env,guildId);
+    c=fresh.find(x=>Number(x.type)===Number(type)&&normalizeManagedName(x.name)===norm&&String(x.parent_id||"")===parent);
+    if(c){if(!channels.some(x=>String(x.id)===String(c.id)))channels.push(c);}
+    else{c=await createDiscordChannel(env,guildId,{name,type,...payload});channels.push(c);}
   }
+  c=await patchDiscordChannel(env,c.id,payload);
+  const i=channels.findIndex(x=>String(x.id)===String(c.id));if(i>=0)channels[i]=c;
   return c;
 }
 
 
+function discordSnowflakeLess_(a,b){
+  try{return BigInt(String(a||"0"))<BigInt(String(b||"0"));}catch(_){return String(a||"")<String(b||"");}
+}
+function managedExpectedForCategory_(config,categoryName){
+  const n=normalizeManagedName(categoryName),out=[];
+  if(n===normalizeManagedName(config?.alliance_name||""))out.push({name:"공지사항",type:0},{name:"참여체크",type:0},{name:"일반채팅",type:0},{name:"음성채팅",type:2});
+  for(const s of (config?.servers||[])){
+    if(n!==normalizeManagedName(s.server_name||s.server_id||""))continue;
+    out.push({name:"보스알림",type:0},{name:"보스참여",type:0});
+    const sid=String(s.server_id||"");
+    for(const g of (config?.guilds||[])){
+      if(String(g.server_id||"")!==sid||String(g.status||"active").toLowerCase()==="inactive")continue;
+      out.push({name:`${g.guild_name}-공지사항`,type:0},{name:`${g.guild_name}-음성채팅`,type:2});
+    }
+  }
+  return out;
+}
+function isExpectedManagedChild_(config,categoryName,ch){
+  const norm=normalizeManagedName(ch?.name||"");
+  return managedExpectedForCategory_(config,categoryName).some(x=>Number(x.type)===Number(ch?.type)&&normalizeManagedName(x.name)===norm);
+}
+function channelRefIds_(config){return new Set((config?.channels||[]).map(x=>String(x.channel_id||"")).filter(Boolean));}
+async function repairGuildCoreDuplicates(env,discordGuildId,config){
+  let channels=await getChannels(env,discordGuildId),removed=0,moved=0;
+  const refs=channelRefIds_(config);
+  const catNames=[String(config?.alliance_name||""),...(config?.servers||[]).map(s=>String(s.server_name||s.server_id||""))].filter(Boolean);
+  for(const catName of catNames){
+    const norm=normalizeManagedName(catName);
+    let cats=channels.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===norm);
+    if(!cats.length)continue;
+    const score=cat=>{const kids=channels.filter(c=>String(c.parent_id||"")===String(cat.id));return kids.filter(c=>refs.has(String(c.id))).length*1000+kids.filter(c=>isExpectedManagedChild_(config,catName,c)).length*10;};
+    cats.sort((a,b)=>score(b)-score(a)||(discordSnowflakeLess_(a.id,b.id)?-1:1));
+    const keep=cats[0];
+    for(const dup of cats.slice(1)){
+      const kids=channels.filter(c=>String(c.parent_id||"")===String(dup.id));
+      for(const child of kids){
+        if(!isExpectedManagedChild_(config,catName,child)){
+          const patched=await patchDiscordChannel(env,child.id,{parent_id:keep.id});moved++;
+          const i=channels.findIndex(c=>String(c.id)===String(child.id));if(i>=0)channels[i]=patched;
+          continue;
+        }
+        const same=channels.find(c=>String(c.parent_id||"")===String(keep.id)&&Number(c.type)===Number(child.type)&&normalizeManagedName(c.name)===normalizeManagedName(child.name));
+        if(same){
+          const keepChild=refs.has(String(child.id))&&!refs.has(String(same.id))?child:same;
+          const dropChild=String(keepChild.id)===String(child.id)?same:child;
+          if(String(keepChild.id)===String(child.id)){await patchDiscordChannel(env,child.id,{parent_id:keep.id});moved++;}
+          await deleteDiscordChannel(env,dropChild.id);removed++;
+          channels=channels.filter(c=>String(c.id)!==String(dropChild.id));
+        }else{
+          const patched=await patchDiscordChannel(env,child.id,{parent_id:keep.id});moved++;
+          const i=channels.findIndex(c=>String(c.id)===String(child.id));if(i>=0)channels[i]=patched;
+        }
+      }
+      const current=await getChannels(env,discordGuildId);
+      if(!current.some(c=>String(c.parent_id||"")===String(dup.id))){await deleteDiscordChannel(env,dup.id);removed++;channels=current.filter(c=>String(c.id)!==String(dup.id));}
+      else channels=current;
+    }
+    channels=await getChannels(env,discordGuildId);
+    for(const spec of managedExpectedForCategory_(config,catName)){
+      let matches=channels.filter(c=>String(c.parent_id||"")===String(keep.id)&&Number(c.type)===Number(spec.type)&&normalizeManagedName(c.name)===normalizeManagedName(spec.name));
+      if(matches.length<=1)continue;
+      matches.sort((a,b)=>{const ar=refs.has(String(a.id))?1:0,br=refs.has(String(b.id))?1:0;return br-ar||(discordSnowflakeLess_(a.id,b.id)?-1:1);});
+      for(const extra of matches.slice(1)){await deleteDiscordChannel(env,extra.id);removed++;}
+      channels=await getChannels(env,discordGuildId);
+    }
+  }
+  const regs=channels.filter(c=>Number(c.type)===0&&!c.parent_id&&normalizeManagedName(c.name)==="등록"&&String(c.topic||"").includes("GuildCore"));
+  if(regs.length>1){regs.sort((a,b)=>discordSnowflakeLess_(a.id,b.id)?-1:1);for(const extra of regs.slice(1)){await deleteDiscordChannel(env,extra.id);removed++;}}
+  return {removed,moved};
+}
+async function resetGuildCoreDiscordStructure(env,discordGuildId,config){
+  let channels=await getChannels(env,discordGuildId),deleted=0;
+  const catNames=[String(config?.alliance_name||""),...(config?.servers||[]).map(s=>String(s.server_name||s.server_id||""))].filter(Boolean);
+  for(const catName of catNames){
+    for(const cat of channels.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(catName))){
+      for(const child of channels.filter(c=>String(c.parent_id||"")===String(cat.id))){if(isExpectedManagedChild_(config,catName,child)){await deleteDiscordChannel(env,child.id);deleted++;}}
+    }
+  }
+  channels=await getChannels(env,discordGuildId);
+  for(const catName of catNames){
+    for(const cat of channels.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(catName))){const kids=channels.filter(c=>String(c.parent_id||"")===String(cat.id));if(!kids.length){await deleteDiscordChannel(env,cat.id);deleted++;}}
+  }
+  channels=await getChannels(env,discordGuildId);
+  for(const reg of channels.filter(c=>Number(c.type)===0&&!c.parent_id&&normalizeManagedName(c.name)==="등록"&&String(c.topic||"").includes("GuildCore"))){await deleteDiscordChannel(env,reg.id);deleted++;}
+  try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
+  return {deleted};
+}
+const DISCORD_SYNC_INFLIGHT_=new Map();
+async function withDiscordSyncLock_(discordGuildId,fn){
+  const key=String(discordGuildId),prev=DISCORD_SYNC_INFLIGHT_.get(key);
+  if(prev)await prev.catch(()=>{});
+  const p=(async()=>fn())();DISCORD_SYNC_INFLIGHT_.set(key,p);
+  try{return await p;}finally{if(DISCORD_SYNC_INFLIGHT_.get(key)===p)DISCORD_SYNC_INFLIGHT_.delete(key);}
+}
+
 async function syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome=false,forceMemberRoles=false}={}){
   if(!config?.alliance_name)throw new Error("GuildCore 연합 설정을 불러오지 못했습니다.");
+  await repairGuildCoreDuplicates(env,discordGuildId,config);
   const botMember=await getBotGuildMember(env,discordGuildId);
   const botUserId=String(botMember?.user?.id||"");
   if(!botUserId)throw new Error("Discord 봇 사용자 ID를 확인할 수 없습니다.");
@@ -778,8 +879,10 @@ async function findAllianceParticipationChannel(env,discordGuildId,config){
 }
 
 async function syncCurrentDiscordServer(env,discordGuildId){
-  const config=await apiCall(env,discordGuildId,"config");
-  return syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false,forceMemberRoles:true});
+  return withDiscordSyncLock_(discordGuildId,async()=>{
+    const config=await apiCall(env,discordGuildId,"config");
+    return syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false,forceMemberRoles:true});
+  });
 }
 
 
@@ -790,7 +893,7 @@ async function runInitialSetup(interaction, env) {
   const bound=await apiCall(env,discordGuildId,"discord_bind_alliance",{query});
   try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
   const config=await apiCall(env,discordGuildId,"config");
-  const synced=await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:true,forceMemberRoles:true});
+  const synced=await withDiscordSyncLock_(discordGuildId,()=>syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:true,forceMemberRoles:true}));
   return {content:`✅ **GuildCore 초기설정 완료**\n연합: ${bound.alliance_name||config.alliance_name}\n등록 채널: <#${synced.register_channel_id}>\n연합 카테고리: ${config.alliance_name}\n서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개 자동 구성\n\n이후 GuildCore 웹에서 길드를 추가하면 자동 동기화됩니다.`};
 }
 async function changeNickname(env, guildId, userId, nickname) {
@@ -967,7 +1070,7 @@ function discordHelpContent() {
     "`/길드비용현황` · `/길드비용` · `/참여통계` · `/정산조회`",
     "",
     "**Discord 초기 설치/연결 관리**",
-    "`/초기설정` → 연합/서버/길드 채널 자동 구성 · `/동기화` 즉시 재동기화",
+    "`/초기설정` → 연합/서버/길드 채널 자동 구성 · `/동기화` 즉시 재동기화 · `/초기화 확인:true` 디코 구조 재구성",
     "`/참여체크생성 제목` → 연합 참여체크 채널에 쟁/행사 참여조사 생성",
     "`/서버연결` · `/서버연결해제` · `/보스알림채널설정` · `/출석채널설정` · `/보스알림테스트`",
     "",
@@ -1244,6 +1347,16 @@ async function handleCommandAsync(interaction, env) {
   }
   if (name === "도움") return {content:discordHelpContent()};
   if (name === "초기설정") return await runInitialSetup(interaction, env);
+  if (name === "초기화") {
+    await requireManager(interaction, env);
+    if(getOption(interaction,"확인")!==true)throw new Error("초기화를 실행하려면 확인을 켜주세요.");
+    return await withDiscordSyncLock_(discordGuildId,async()=>{
+      const config=await apiCall(env,discordGuildId,"config");
+      const reset=await resetGuildCoreDiscordStructure(env,discordGuildId,config);
+      const synced=await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false,forceMemberRoles:true});
+      return {content:`✅ GuildCore Discord 구조 초기화 완료\n정리 ${reset.deleted}개 · 서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개\n길드원 등록/보스/출석 데이터는 삭제하지 않았습니다.`};
+    });
+  }
   if (name === "동기화") {
     await requireManager(interaction, env);
     const r=await syncCurrentDiscordServer(env,discordGuildId);
@@ -1707,7 +1820,7 @@ export default {
     }
 
     if (interaction.type === 2) {
-      const ephemeralNames = new Set(["핑","초기설정","동기화","참여체크생성","등록","웹핀","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보탐대조","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
+      const ephemeralNames = new Set(["핑","초기설정","초기화","동기화","참여체크생성","등록","웹핀","컷","보스알림채널설정","출석채널설정","보스알림테스트","내출석","보탐대조","보스등록","보스수정","보스제거","출석종료","참여삭제","연합공지","길드공지","공지확인","길드원확인","길드원추가","아이템내역","아이템등록","아이템판매","길드비용현황","길드비용","참여통계","정산조회"]);
       const ephemeral = ephemeralNames.has(interaction.data?.name);
       ctx.waitUntil((async()=>{
         try { await editOriginal(interaction, await handleCommandAsync(interaction, env)); }
