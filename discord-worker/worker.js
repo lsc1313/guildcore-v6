@@ -709,18 +709,48 @@ async function repairGuildCoreDuplicates(env,discordGuildId,config){
 async function resetGuildCoreDiscordStructure(env,discordGuildId,config){
   let channels=await getChannels(env,discordGuildId),deleted=0;
   const catNames=[String(config?.alliance_name||""),...(config?.servers||[]).map(s=>String(s.server_name||s.server_id||""))].filter(Boolean);
-  for(const catName of catNames){
-    for(const cat of channels.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(catName))){
-      for(const child of channels.filter(c=>String(c.parent_id||"")===String(cat.id))){if(isExpectedManagedChild_(config,catName,child)){await deleteDiscordChannel(env,child.id);deleted++;}}
+  const managedNorms=new Set(catNames.map(normalizeManagedName));
+
+  /* /초기화는 Discord 구조를 실제로 완전 재구성한다.
+     GuildCore 관리 카테고리 아래 채널은 종류/이름과 무관하게 전부 제거한다.
+     D1 길드원/보스/출석 데이터와 Discord 역할은 건드리지 않는다. */
+  const managedCats=channels.filter(c=>Number(c.type)===4&&managedNorms.has(normalizeManagedName(c.name)));
+
+  for(const cat of managedCats){
+    const children=channels.filter(c=>String(c.parent_id||"")===String(cat.id));
+    for(const child of children){
+      await deleteDiscordChannel(env,child.id);
+      deleted++;
     }
   }
-  channels=await getChannels(env,discordGuildId);
-  for(const catName of catNames){
-    for(const cat of channels.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(catName))){const kids=channels.filter(c=>String(c.parent_id||"")===String(cat.id));if(!kids.length){await deleteDiscordChannel(env,cat.id);deleted++;}}
+
+  /* 자식 삭제 후 카테고리 자체도 전부 제거한다. 중복 카테고리도 여기서 함께 사라진다. */
+  for(const cat of managedCats){
+    await deleteDiscordChannel(env,cat.id);
+    deleted++;
   }
+
+  /* 카테고리 밖의 GuildCore 등록 채널도 중복 포함 전부 제거 후 하나만 다시 만든다. */
   channels=await getChannels(env,discordGuildId);
-  for(const reg of channels.filter(c=>Number(c.type)===0&&!c.parent_id&&normalizeManagedName(c.name)==="등록"&&String(c.topic||"").includes("GuildCore"))){await deleteDiscordChannel(env,reg.id);deleted++;}
+  for(const reg of channels.filter(c=>
+    Number(c.type)===0 &&
+    !c.parent_id &&
+    normalizeManagedName(c.name)==="등록" &&
+    (String(c.topic||"").includes("GuildCore") || String(c.name||"").includes("등록"))
+  )){
+    await deleteDiscordChannel(env,reg.id);
+    deleted++;
+  }
+
   try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
+
+  /* 삭제 결과 검증: 관리 카테고리가 남았으면 초기화를 성공 처리하지 않는다. */
+  channels=await getChannels(env,discordGuildId);
+  const remain=channels.filter(c=>Number(c.type)===4&&managedNorms.has(normalizeManagedName(c.name)));
+  if(remain.length){
+    throw new Error(`Discord 구조 초기화 미완료: 관리 카테고리 ${remain.length}개가 남아 있습니다. 봇의 채널 관리 권한을 확인하세요.`);
+  }
+
   return {deleted};
 }
 const DISCORD_SYNC_INFLIGHT_=new Map();
@@ -1354,7 +1384,15 @@ async function handleCommandAsync(interaction, env) {
       const config=await apiCall(env,discordGuildId,"config");
       const reset=await resetGuildCoreDiscordStructure(env,discordGuildId,config);
       const synced=await syncGuildCoreStructure(env,discordGuildId,config,{sendWelcome:false,forceMemberRoles:true});
-      return {content:`✅ GuildCore Discord 구조 초기화 완료\n정리 ${reset.deleted}개 · 서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개\n길드원 등록/보스/출석 데이터는 삭제하지 않았습니다.`};
+      const check=await getChannels(env,discordGuildId);
+      const managedNames=[String(config?.alliance_name||""),...(config?.servers||[]).map(s=>String(s.server_name||s.server_id||""))].filter(Boolean);
+      const dupNames=[];
+      for(const n of managedNames){
+        const count=check.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(n)).length;
+        if(count>1)dupNames.push(`${n}(${count})`);
+      }
+      if(dupNames.length)throw new Error(`초기화 후 중복 카테고리 감지: ${dupNames.join(", ")}`);
+      return {content:`✅ GuildCore Discord 구조 초기화 완료\n기존 구조 ${reset.deleted}개 삭제 · 서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개 재구성\n중복 카테고리 검사 완료 · 길드원/보스/출석 데이터는 유지했습니다.`};
     });
   }
   if (name === "동기화") {
