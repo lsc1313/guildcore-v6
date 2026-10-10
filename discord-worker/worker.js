@@ -773,6 +773,25 @@ async function resetGuildCoreDiscordStructure(env,discordGuildId,config){
     deleted++;
   }
 
+  /* 예전 동기화/중복 정리 과정에서 카테고리 밖이나 다른 카테고리에 남은
+     길드 전용 채널도 서버 전체에서 제거한다.
+     현재 GuildCore에 등록된 길드명과 정확히 맞는 공지/음성만 대상으로 한다. */
+  channels=await getChannels(env,discordGuildId);
+  const guildManagedNames=new Set();
+  for(const g of (config?.guilds||[])){
+    const gn=String(g.guild_name||"").trim();
+    if(!gn)continue;
+    guildManagedNames.add(normalizeManagedName(gn+"-공지사항"));
+    guildManagedNames.add(normalizeManagedName(gn+"-음성채팅"));
+  }
+  for(const ch of channels){
+    const n=normalizeManagedName(ch.name);
+    if(guildManagedNames.has(n)){
+      await deleteDiscordChannel(env,ch.id);
+      deleted++;
+    }
+  }
+
   try{await caches.default.delete(new Request(`https://guildcore.cache/config:${discordGuildId}`));}catch(_){}
 
   /* 삭제 결과 검증: 관리 카테고리가 남았으면 초기화를 성공 처리하지 않는다. */
@@ -1430,8 +1449,18 @@ async function handleCommandAsync(interaction, env) {
         const count=check.filter(c=>Number(c.type)===4&&normalizeManagedName(c.name)===normalizeManagedName(n)).length;
         if(count>1)dupNames.push(`${n}(${count})`);
       }
-      if(dupNames.length)throw new Error(`초기화 후 중복 카테고리 감지: ${dupNames.join(", ")}`);
-      return {content:`✅ GuildCore Discord 구조 초기화 완료\n기존 구조 ${reset.deleted}개 삭제 · 서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개 재구성\n중복 카테고리 검사 완료 · 길드원/보스/출석 데이터는 유지했습니다.`};
+      const guildDup=[];
+      for(const g of (config?.guilds||[])){
+        const gn=String(g.guild_name||"").trim();
+        if(!gn)continue;
+        for(const suffix of ["-공지사항","-음성채팅"]){
+          const target=normalizeManagedName(gn+suffix);
+          const count=check.filter(c=>normalizeManagedName(c.name)===target).length;
+          if(count>1)guildDup.push(`${gn}${suffix}(${count})`);
+        }
+      }
+      if(dupNames.length||guildDup.length)throw new Error(`초기화 후 중복 감지: ${[...dupNames,...guildDup].join(", ")}`);
+      return {content:`✅ GuildCore Discord 구조 초기화 완료\n기존 구조 ${reset.deleted}개 삭제 · 서버 ${synced.server_count}개 · 길드 ${synced.guild_count}개 재구성\n카테고리/길드채널 중복 검사 완료 · 길드원/보스/출석 데이터는 유지했습니다.`};
     });
   }
   if (name === "동기화") {
