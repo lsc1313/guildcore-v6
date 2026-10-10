@@ -568,7 +568,12 @@ function memberOverwrite(userId,allow,deny="0"){return {id:String(userId),type:1
 
 
 function normalizeManagedName(name){
-  return String(name||"").replace(/^[^0-9A-Za-z가-힣]+/,"").trim();
+  return String(name||"")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g,"")
+    .replace(/^[^0-9A-Za-z가-힣]+/,"")
+    .replace(/\s+/g,"")
+    .trim();
 }
 
 async function deleteDiscordChannel(env, channelId){
@@ -710,11 +715,37 @@ async function resetGuildCoreDiscordStructure(env,discordGuildId,config){
   let channels=await getChannels(env,discordGuildId),deleted=0;
   const catNames=[String(config?.alliance_name||""),...(config?.servers||[]).map(s=>String(s.server_name||s.server_id||""))].filter(Boolean);
   const managedNorms=new Set(catNames.map(normalizeManagedName));
+  const guildNames=new Set((config?.guilds||[]).map(g=>normalizeManagedName(g.guild_name||"")).filter(Boolean));
+
+  function isGuildCoreManagedCategory_(cat){
+    if(Number(cat?.type)!==4)return false;
+    if(managedNorms.has(normalizeManagedName(cat.name)))return true;
+
+    const kids=channels.filter(c=>String(c.parent_id||"")===String(cat.id));
+    if(!kids.length)return false;
+
+    const names=kids.map(c=>normalizeManagedName(c.name));
+    const allianceCommon=["공지사항","참여체크","일반채팅","음성채팅"];
+    const serverCommon=["보스알림","보스참여"];
+
+    const allianceScore=allianceCommon.filter(n=>names.includes(n)).length;
+    const serverScore=serverCommon.filter(n=>names.includes(n)).length;
+
+    let guildScore=0;
+    for(const n of names){
+      for(const g of guildNames){
+        if(n===normalizeManagedName(g+"-공지사항") || n===normalizeManagedName(g+"-음성채팅"))guildScore++;
+      }
+    }
+
+    /* 이름이 달라도 GuildCore 표준 채널 묶음이면 관리 카테고리로 판정 */
+    return allianceScore>=2 || serverScore>=2 || guildScore>=2;
+  }
 
   /* /초기화는 Discord 구조를 실제로 완전 재구성한다.
-     GuildCore 관리 카테고리 아래 채널은 종류/이름과 무관하게 전부 제거한다.
+     이름뿐 아니라 GuildCore 표준 채널 구성을 가진 과거/중복 카테고리까지 전부 제거한다.
      D1 길드원/보스/출석 데이터와 Discord 역할은 건드리지 않는다. */
-  const managedCats=channels.filter(c=>Number(c.type)===4&&managedNorms.has(normalizeManagedName(c.name)));
+  const managedCats=channels.filter(isGuildCoreManagedCategory_);
 
   for(const cat of managedCats){
     const children=channels.filter(c=>String(c.parent_id||"")===String(cat.id));
@@ -746,12 +777,20 @@ async function resetGuildCoreDiscordStructure(env,discordGuildId,config){
 
   /* 삭제 결과 검증: 관리 카테고리가 남았으면 초기화를 성공 처리하지 않는다. */
   channels=await getChannels(env,discordGuildId);
-  const remain=channels.filter(c=>Number(c.type)===4&&managedNorms.has(normalizeManagedName(c.name)));
+  const remain=channels.filter(c=>{
+    if(Number(c.type)!==4)return false;
+    if(managedNorms.has(normalizeManagedName(c.name)))return true;
+    const kids=channels.filter(x=>String(x.parent_id||"")===String(c.id));
+    const names=kids.map(x=>normalizeManagedName(x.name));
+    const allianceScore=["공지사항","참여체크","일반채팅","음성채팅"].filter(n=>names.includes(n)).length;
+    const serverScore=["보스알림","보스참여"].filter(n=>names.includes(n)).length;
+    return allianceScore>=2 || serverScore>=2;
+  });
   if(remain.length){
     throw new Error(`Discord 구조 초기화 미완료: 관리 카테고리 ${remain.length}개가 남아 있습니다. 봇의 채널 관리 권한을 확인하세요.`);
   }
 
-  return {deleted};
+  return {deleted,matched_categories:managedCats.map(c=>String(c.name||""))};
 }
 const DISCORD_SYNC_INFLIGHT_=new Map();
 async function withDiscordSyncLock_(discordGuildId,fn){
@@ -1774,7 +1813,7 @@ export default {
       return Response.json(result);
     }
 
-    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.32 ATTENDANCE SOURCE OK");
+    if (request.method === "GET") return new Response("GuildCore Discord Worker v3.34 FULL RESET OK");
 
     // MessengerBotR -> Cloudflare -> GuildCore_INPUT
     // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
