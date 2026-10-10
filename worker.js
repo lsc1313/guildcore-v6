@@ -1744,6 +1744,11 @@ async function botPullAlerts_(env,aid,p){
   const seen=new Set();
   for(const x of rows){
     const due=new Date(x.due_at),spawn=new Date(x.spawn_at),type=String(x.alert_type||"");
+    /* Kakao boss alerts: only 10m + 5m. Discord keeps the full alert set. */
+    if(target==="kakao"&&type!=="10m"&&type!=="5m"){
+      await run(env.DB,`UPDATE boss_alert_queue SET kakao_status='expired' WHERE alert_id=?`,x.alert_id);
+      continue;
+    }
     if(Number.isNaN(due.getTime())){await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;}
     /* 예정 시각 전 큐는 아직 보내지 않는다. */
     if(due.getTime()>now)continue;
