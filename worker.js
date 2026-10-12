@@ -1338,6 +1338,9 @@ async function ensureScheduledAttendanceEvent(env,boss,spawn,now=new Date()){
 }
 
 const BOSS_ALERT_LATE_GRACE_MS = 90 * 1000;
+/* Kakao can recover queued pre-spawn alerts after a temporary polling outage.
+   Never deliver a pre-spawn alert once its boss has spawned. */
+const KAKAO_ALERT_LATE_GRACE_MS = 10 * 60 * 1000;
 function bossAlertId_(boss,spawn,type){
   return `alert_${String(boss.alliance_id)}_${String(boss.boss_id)}_${Math.floor(spawn.getTime()/1000)}_${String(type)}`;
 }
@@ -1754,7 +1757,7 @@ async function botPullAlerts_(env,aid,p){
     if(due.getTime()>now)continue;
     const late=now-due.getTime();
     /* 90초 이상 늦은 알림은 잘못된 시각에 보내지 않고 폐기한다. */
-    if(late>BOSS_ALERT_LATE_GRACE_MS){await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;}
+    if(late>(target==="kakao"&&(type==="10m"||type==="5m")?KAKAO_ALERT_LATE_GRACE_MS:BOSS_ALERT_LATE_GRACE_MS)){await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;}
     /* 10/5/1분 전 알림은 보스 젠 이후에는 절대 보내지 않는다. */
     if(type!=="spawn"&&!Number.isNaN(spawn.getTime())&&now>=spawn.getTime()){
       await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;
