@@ -1861,9 +1861,12 @@ ${grouped(r.attendance_only)}
 
 async function handleBotApi(request,env){
   let body={};try{body=await request.json()}catch{body={};}
-  const bearer=request.headers.get("Authorization")?.replace(/^Bearer\s+/i,"")||"",received=String(bearer||body.key||""),expected=String(env.BOT_API_KEY||env.GUILDCORE_API_KEY||env.GUILDCORE_BRIDGE_KEY||"");
-  if(!expected)return json({ok:false,error:"V6 BOT_API_KEY(GUILDCORE_API_KEY) secret이 설정되지 않았습니다."},500);
-  if(received!==expected)return json({ok:false,error:"인증 실패"},401);
+  const bearer=request.headers.get("Authorization")?.replace(/^Bearer\s+/i,"")||"",received=String(bearer||body.key||"");
+  // Preserve the currently configured mobile bot key; add an optional, independent PC bridge secret.
+  const legacyKey=String(env.BOT_API_KEY||env.GUILDCORE_API_KEY||env.GUILDCORE_BRIDGE_KEY||"");
+  const pcKey=String(env.GUILDCORE_PC_API_KEY||"");
+  if(!legacyKey&&!pcKey)return json({ok:false,error:"봇 API 인증키가 설정되지 않았습니다."},500);
+  if(!received||!((legacyKey&&received===legacyKey)||(pcKey&&received===pcKey)))return json({ok:false,error:"인증 실패"},401);
   try{
     const action=String(body.action||"").trim(),p=body.payload||{},discordServerId=String(body.discord_server_id||"");
     if(action==="kakao_resolve_alliance")return json({ok:true,data:await botResolveAllianceQuery_(env,p.query||"")});
