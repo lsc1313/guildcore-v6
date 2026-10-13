@@ -1781,6 +1781,20 @@ async function botPullAlerts_(env,aid,p){
   }
   return {target,alerts:live.map(x=>({alert_id:x.alert_id,boss_id:x.boss_id,boss_name:x.boss_name,boss_scope:x.boss_scope||"WORLD",server_id:x.server_id||"",server_name:x.server_name||"",alert_type:x.alert_type,message:target==="kakao"?(String(x.message||"").startsWith("📢 [전체알림]")?String(x.message||""):`📢 [전체알림] ${String(x.message||"")}`):x.message,discord_channel_id:x.discord_channel_id||"",discord_channel_ids:x.discord_channel_ids||"",spawn_at:x.spawn_at?formatKst(x.spawn_at,false):"",due_at:x.due_at?formatKst(x.due_at,false):"",attendance_event_id:x.attendance_event_id||"",attendance_channel_id:x.attendance_channel_id||"",attendance_channel_ids:x.attendance_channel_ids||""}))};
 }
+// V21 diagnostic-only: a true read-only queue snapshot. No alert generation, status change or claim.
+async function botPeekKakaoAlerts_(env,aid,p){
+  const limit=Math.max(1,Math.min(50,Number(p.limit||10)));
+  const rows=await all(env.DB,"SELECT alert_id,boss_id,boss_name,alert_type,due_at,spawn_at,kakao_status,message FROM boss_alert_queue WHERE alliance_id=? AND kakao_status='queued' ORDER BY due_at,created_at LIMIT ?",aid,limit);
+  const now=Date.now();
+  const alerts=rows.map(x=>{
+    const due=Date.parse(x.due_at||"");
+    const spawn=Date.parse(x.spawn_at||"");
+    const kind=String(x.alert_type||"");
+    const eligible=(kind==="10m"||kind==="5m")&&Number.isFinite(due)&&due<=now&&(now-due)<=90000&&(!Number.isFinite(spawn)||now<spawn);
+    return {alert_id:String(x.alert_id||""),boss_name:String(x.boss_name||""),alert_type:kind,due_at:String(x.due_at||""),spawn_at:String(x.spawn_at||""),message:String(x.message||""),eligible_now:eligible};
+  });
+  return {mode:"read_only",queue_modified:false,alerts};
+}
 async function botMarkAlerts_(env,aid,p){const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",sent=target+"_sent_at",ids=Array.isArray(p.alert_ids)?p.alert_ids.map(String):[];if(!ids.length)return {updated:0,target};const ph=ids.map(()=>"?").join(","),status=String(p.status||"sent");await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph})`,status,status==="sent"?nowIso():"",String(p.note||""),String(p.note||""),aid,...ids);return {updated:ids.length,target};}
 
 async function botPullAttendanceResults_(env,aid,p){
@@ -1922,6 +1936,7 @@ async function handleBotApi(request,env){
       case "guild_stats":data=await botGuildStats_(env,aid,p);break;
       case "settlement_preview":data=await botSettlement_(env,aid,p);break;
       case "alerts_pull":data=await botPullAlerts_(env,aid,p);break;
+      case "alerts_peek":data=await botPeekKakaoAlerts_(env,aid,p);break;
       case "alerts_mark":data=await botMarkAlerts_(env,aid,p);break;
       case "attendance_results_pull":data=await botPullAttendanceResults_(env,aid,p);break;
       case "attendance_results_mark":data=await botMarkAttendanceResults_(env,aid,p);break;
