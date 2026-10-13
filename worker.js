@@ -1880,7 +1880,10 @@ async function handleBotApi(request,env){
   const legacyKey=String(env.BOT_API_KEY||env.GUILDCORE_API_KEY||env.GUILDCORE_BRIDGE_KEY||"");
   const pcKey=String(env.GUILDCORE_PC_API_KEY||"");
   if(!legacyKey&&!pcKey)return json({ok:false,error:"봇 API 인증키가 설정되지 않았습니다."},500);
-  if(!received||!((legacyKey&&received===legacyKey)||(pcKey&&received===pcKey)))return json({ok:false,error:"인증 실패"},401);
+  // PC-only mode: reject all legacy bot credentials, including mobile MessengerBotR.
+  // Keep the old Cloudflare secret unchanged for an easy rollback.
+  if(!pcKey)return json({ok:false,error:"PC bot API secret is not configured"},503);
+  if(!received||received!==pcKey)return json({ok:false,error:"인증 실패"},401);
   try{
     const action=String(body.action||"").trim(),p=body.payload||{},discordServerId=String(body.discord_server_id||"");
     if(action==="kakao_resolve_alliance")return json({ok:true,data:await botResolveAllianceQuery_(env,p.query||"")});
