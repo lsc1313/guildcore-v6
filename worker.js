@@ -1360,7 +1360,10 @@ async function generateDueBossAlerts_(env,now=new Date()){
         if(!a.on)continue;
         const due=new Date(spawn.getTime()-a.mins*60000),lag=now.getTime()-due.getTime();
         /* 미래 알림은 만들지 않고, 90초 이상 늦은 알림도 만들지 않는다. */
-        if(lag<0||lag>BOSS_ALERT_LATE_GRACE_MS)continue;
+        // Allow a bounded recovery window when a scheduled trigger runs late.
+        // Pre-spawn alerts still cannot be generated after the boss spawns.
+        const generationGrace=(a.type==="10m"||a.type==="5m")?3*60*1000:BOSS_ALERT_LATE_GRACE_MS;
+        if(lag<0||lag>generationGrace)continue;
         /* 젠이 이미 지난 뒤에는 10/5/1분 전 알림을 절대 만들지 않는다. */
         if(a.type!=="spawn"&&now.getTime()>=spawn.getTime())continue;
         const srv=b.server_id?await serverMeta(env,b.alliance_id,b.server_id):null,t=formatKst(spawn,false).slice(-5),msg=a.type==="spawn"?`🚨 [${b.boss_name}] 젠 시간입니다! (${t} 젠)`:`⏰ [${b.boss_name}] 젠 ${a.mins}분 전입니다. (${t} 젠)`;
@@ -1768,6 +1771,14 @@ async function botPullAlerts_(env,aid,p){
       await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;
     }
     seen.add(dedupe);
+    // A queued legacy duplicate must not be re-delivered after an equivalent alert was marked sent.
+    if(target==="kakao"){
+      const alreadySent=await first(env.DB,"SELECT alert_id FROM boss_alert_queue WHERE alliance_id=? AND boss_id=? AND spawn_at=? AND alert_type=? AND kakao_status='sent' LIMIT 1",aid,x.boss_id,x.spawn_at,type);
+      if(alreadySent){
+        await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='expired' WHERE alliance_id=? AND boss_id=? AND spawn_at=? AND alert_type=? AND kakao_status='queued'",aid,x.boss_id,x.spawn_at,type);
+        continue;
+      }
+    }
     /* 과거 버전에서 랜덤 alert_id로 생성된 동일 알림까지 함께 정리한다. */
     await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alliance_id=? AND boss_id=? AND spawn_at=? AND alert_type=? AND alert_id<>? AND ${key}='queued'`,aid,x.boss_id,x.spawn_at,type,x.alert_id);
     let eventId="",attendanceIds=[];
