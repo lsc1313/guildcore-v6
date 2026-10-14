@@ -1880,12 +1880,15 @@ async function handleBotApi(request,env){
   const legacyKey=String(env.BOT_API_KEY||env.GUILDCORE_API_KEY||env.GUILDCORE_BRIDGE_KEY||"");
   const pcKey=String(env.GUILDCORE_PC_API_KEY||"");
   if(!legacyKey&&!pcKey)return json({ok:false,error:"봇 API 인증키가 설정되지 않았습니다."},500);
-  // PC-only mode: reject all legacy bot credentials, including mobile MessengerBotR.
-  // Keep the old Cloudflare secret unchanged for an easy rollback.
-  if(!pcKey)return json({ok:false,error:"PC bot API secret is not configured"},503);
-  if(!received||received!==pcKey)return json({ok:false,error:"인증 실패"},401);
+  // Allow the existing mobile bot and the independent PC credential.
+  if(!received||!((legacyKey&&received===legacyKey)||(pcKey&&received===pcKey)))return json({ok:false,error:"인증 실패"},401);
   try{
     const action=String(body.action||"").trim(),p=body.payload||{},discordServerId=String(body.discord_server_id||"");
+    // The mobile bot is the sole Kakao sender. Keep PC bridge polling in standby to avoid duplicate posts.
+    if(pcKey&&received===pcKey&&(!legacyKey||received!==legacyKey)&&String(p.target||"discord").toLowerCase()==="kakao"){
+      if(action==="alerts_pull"||action==="attendance_results_pull")return json({ok:true,data:{target:"kakao",alerts:[],results:[],standby:true}});
+      if(action==="alerts_mark"||action==="attendance_results_mark")return json({ok:true,data:{target:"kakao",updated:0,standby:true}});
+    }
     if(action==="kakao_resolve_alliance")return json({ok:true,data:await botResolveAllianceQuery_(env,p.query||"")});
     if(action==="discord_alliance_list")return json({ok:true,data:await botListAlliances_(env)});
     if(action==="discord_bind_alliance")return json({ok:true,data:await botBindAlliance_(env,discordServerId,p.query||"")});
