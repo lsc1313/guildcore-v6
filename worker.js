@@ -1970,6 +1970,31 @@ async function handleBotApi(request,env){
   }catch(e){return json({ok:false,error:errorMessage(e)},400);}
 }
 
+
+/* Optional direct Kakao endpoint. The old Discord /kakao relay remains live until cutover.
+   Uses a separate KAKAO_INPUT_KEY secret; never accepts the bot bridge key from phones. */
+async function handleDirectKakao_(request,env){
+  if(!env.KAKAO_INPUT_KEY)return json({ok:false,error:"KAKAO_INPUT_KEY is not configured on GuildCore"},503);
+  let body={};try{body=await request.json()}catch{return json({ok:false,error:"JSON 형식 오류"},400)}
+  if(!body||String(body.key||"")!==String(env.KAKAO_INPUT_KEY))return json({ok:false,error:"인증 실패"},401);
+  const mode=String(body.mode||"").trim(),aid=String(body.alliance_id||"").trim(),p=body.payload||{};
+  try{
+    if(mode==="resolve_alliance")return json({ok:true,data:await botResolveAllianceQuery_(env,String(body.alliance_query||"").trim())});
+    if(!aid)return json({ok:false,error:"카톡방에 연결된 연합이 없습니다. !핑 연합명 으로 연결하세요."},400);
+    // Validate the alliance using the same resolver as /api/bot.
+    const found=await botResolveAlliance_(env,{alliance_id:aid});
+    const validAid=String(found.alliance_id);
+    let data;
+    if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
+    else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note});
+    else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
+    else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note});
+    else if(!mode)data=await botKakaoCommand_(env,validAid,p);
+    else return json({ok:false,error:"지원하지 않는 mode: "+mode},400);
+    return json({ok:true,data});
+  }catch(e){return json({ok:false,error:errorMessage(e)},400)}
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -1990,6 +2015,9 @@ export default {
         } catch (e) {
           return json({ok:false,error:errorMessage(e)},400);
         }
+      }
+      if (request.method === "POST" && url.pathname === "/kakao") {
+        return await handleDirectKakao_(request, env);
       }
       if (request.method === "POST" && url.pathname === "/api/bot") {
         return await handleBotApi(request, env);
