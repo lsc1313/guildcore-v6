@@ -793,6 +793,10 @@ async function buildAttendanceLiveMessage_(env,aid,eventId,check=null,reason="")
 async function queueKakaoAttendanceLive_(env,aid,eventId,check=null,reason="스크린샷 대조"){
   await ensureAttendanceResultQueueSchema_(env);const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",String(aid||""),String(eventId||""));if(!e)return;
   const built=await buildAttendanceLiveMessage_(env,aid,eventId,check,reason),srv=e.server_id?await serverMeta(env,aid,e.server_id):null,now=nowIso();
+  // Repeating the same screenshot analysis must not enqueue another identical Kakao notification.
+  // New content for the same event is still allowed through.
+  const duplicate=await first(env.DB,"SELECT result_id FROM attendance_result_queue WHERE alliance_id=? AND event_id=? AND message=? AND note='screenshot live update' AND kakao_status IN ('queued','sent') LIMIT 1",String(aid||""),e.event_id,built.message);
+  if(duplicate)return;
   await run(env.DB,"INSERT INTO attendance_result_queue(result_id,alliance_id,event_id,boss_id,boss_name,boss_scope,server_id,server_name,message,discord_status,kakao_status,created_at,discord_message_id,discord_channel_id,note) VALUES(?,?,?,?,?,?,?,?,?,'sent','queued',?,'','','screenshot live update')",uid("result"),String(aid||""),e.event_id,e.boss_id,e.boss_name,e.boss_scope||"WORLD",e.server_id||"",srv?.server_name||"",built.message,now);
 }
 async function getAttendanceEvents(env,allianceId,guildId,startDate,endDate,authToken){
@@ -1810,7 +1814,18 @@ async function botMarkAlerts_(env,aid,p){const target=String(p.target||"discord"
 
 async function botPullAttendanceResults_(env,aid,p){
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,limit),results=[];
+  const seen=new Set();
   for(const x of rows){
+    if(target==="kakao"){
+      const duplicateKey=String(x.event_id)+"|"+String(x.message);
+      if(seen.has(duplicateKey)){
+        await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);
+        continue;
+      }
+      seen.add(duplicateKey);
+      const sent=await first(env.DB,"SELECT result_id FROM attendance_result_queue WHERE alliance_id=? AND event_id=? AND message=? AND kakao_status='sent' LIMIT 1",aid,x.event_id,x.message);
+      if(sent){await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);continue;}
+    }
     const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id),links=e?botParseEventDiscordLinks_(e.note):[],fallback=e?await botResolveChannels_(env,aid,"attendance",e.boss_scope||"WORLD",e.server_id||""):[];
     results.push({result_id:x.result_id,event_id:x.event_id,event_type:e?.event_type||"",boss_name:x.boss_name,boss_scope:x.boss_scope||"WORLD",server_id:x.server_id||"",server_name:x.server_name||"",message:x.message||"",discord_message_id:x.discord_message_id||e?.discord_message_id||"",discord_channel_id:x.discord_channel_id||e?.discord_channel_id||"",discord_message_links:links,discord_channel_ids:fallback.join(",")});
   }
