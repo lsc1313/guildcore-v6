@@ -1787,12 +1787,6 @@ async function botPullAlerts_(env,aid,p){
       if(eid&&await first(env.DB,"SELECT 1 FROM boss_events WHERE alliance_id=? AND event_id=?",aid,eid)){eventId=eid;attendanceIds=await botResolveChannels_(env,aid,"attendance",x.boss_scope||"WORLD",x.server_id||"");}
     }
     const alertIds=await botResolveChannels_(env,aid,"alert",x.boss_scope||"WORLD",x.server_id||"");
-    // Atomic claim: concurrent pollers may inspect the same queued row but only one receives it.
-    // The consumer still acknowledges with alerts_mark, which changes claimed -> sent.
-    if(target==="kakao"){
-      const claimed=await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='claimed' WHERE alliance_id=? AND alert_id=? AND kakao_status='queued'",aid,x.alert_id);
-      if(Number(claimed?.meta?.changes||0)!==1)continue;
-    }
     live.push({...x,attendance_event_id:eventId,attendance_channel_id:attendanceIds[0]||"",attendance_channel_ids:attendanceIds.join(","),discord_channel_id:alertIds[0]||String(x.discord_channel_id||""),discord_channel_ids:alertIds.join(",")||String(x.discord_channel_ids||"")});
     if(live.length>=limit)break;
   }
