@@ -1832,6 +1832,10 @@ async function botPullAlerts_(env,aid,p){
     }
     /* 과거 버전에서 랜덤 alert_id로 생성된 동일 알림까지 함께 정리한다. */
     await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alliance_id=? AND boss_id=? AND spawn_at=? AND alert_type=? AND alert_id<>? AND ${key}='queued'`,aid,x.boss_id,x.spawn_at,type,x.alert_id);
+    if(target==="kakao"){
+      const claim=await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='sending' WHERE alliance_id=? AND alert_id=? AND kakao_status='queued'",aid,x.alert_id);
+      if(Number(claim?.meta?.changes||0)!==1)continue;
+    }
     let eventId="",attendanceIds=[];
     if(type==="spawn"){
       const d=new Date(x.spawn_at),eid=!Number.isNaN(d.getTime())?`event_${x.boss_id}_${Math.floor(d.getTime()/1000)}`:"";
@@ -1873,7 +1877,8 @@ async function botPullAttendanceResults_(env,aid,p){
       const sent=await first(env.DB,"SELECT result_id FROM attendance_result_queue WHERE alliance_id=? AND event_id=? AND message=? AND kakao_status='sent' LIMIT 1",aid,x.event_id,x.message);
       if(sent){await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);continue;}
     }
-    if(target==="kakao"){const claimed=await run(env.DB,"UPDATE attendance_result_queue SET kakao_status=\'sending\' WHERE alliance_id=? AND result_id=? AND kakao_status=\'queued\'",aid,x.result_id);if(Number(claimed?.meta?.changes||0)!==1)continue;}\n    const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id),links=e?botParseEventDiscordLinks_(e.note):[],fallback=e?await botResolveChannels_(env,aid,"attendance",e.boss_scope||"WORLD",e.server_id||""):[];
+    if(target==="kakao"){const claimed=await run(env.DB,"UPDATE attendance_result_queue SET kakao_status=\'sending\' WHERE alliance_id=? AND result_id=? AND kakao_status=\'queued\'",aid,x.result_id);if(Number(claimed?.meta?.changes||0)!==1)continue;}
+    const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id),links=e?botParseEventDiscordLinks_(e.note):[],fallback=e?await botResolveChannels_(env,aid,"attendance",e.boss_scope||"WORLD",e.server_id||""):[];
     results.push({result_id:x.result_id,event_id:x.event_id,event_type:e?.event_type||"",boss_name:x.boss_name,boss_scope:x.boss_scope||"WORLD",server_id:x.server_id||"",server_name:x.server_name||"",message:x.message||"",discord_message_id:x.discord_message_id||e?.discord_message_id||"",discord_channel_id:x.discord_channel_id||e?.discord_channel_id||"",discord_message_links:links,discord_channel_ids:fallback.join(",")});
   }
   return {target,results};
