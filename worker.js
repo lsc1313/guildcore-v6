@@ -1359,7 +1359,7 @@ async function generateDueBossAlerts_(env,now=new Date()){
     }else spawns=scheduledCandidates(b,now);
     for(const spawn of spawns){
       if(!spawn||Number.isNaN(spawn.getTime()))continue;
-      if(b.boss_type!=="cooldown")await ensureScheduledAttendanceEvent(env,b,spawn,now);
+      // Fixed/weekly attendance is opened by !컷; scheduled spawns only generate reminders.
       for(const a of [{type:"10m",mins:10,on:boolVal(b.alert_10m,true)},{type:"5m",mins:5,on:boolVal(b.alert_5m,true)},{type:"1m",mins:1,on:boolVal(b.alert_1m,true)},{type:"spawn",mins:0,on:boolVal(b.alert_spawn,true)}]){
         if(!a.on)continue;
         const due=new Date(spawn.getTime()-a.mins*60000),lag=now.getTime()-due.getTime();
@@ -1638,7 +1638,28 @@ async function botBossUpdate_(env,aid,p){
 }
 async function botBossDisable_(env,aid,p){const b=await botBossRow_(env,aid,p.boss,p);await botRequireBossConfigScope_(env,aid,p,b.boss_scope||"WORLD",b.server_id||"");await env.DB.batch([env.DB.prepare("UPDATE bosses SET enabled=0,updated_at=? WHERE boss_id=?").bind(nowIso(),b.boss_id),env.DB.prepare("UPDATE boss_state SET status='삭제',updated_at=? WHERE alliance_id=? AND boss_id=?").bind(nowIso(),aid,b.boss_id)]);return {boss_id:b.boss_id,boss_name:b.boss_name,message:"보스를 비활성화했습니다. 과거 기록은 유지됩니다."};}
 async function botBossCut_(env,aid,p){
-  const actor=await botRequireBossAction_(env,aid,p),b=await botBossRow_(env,aid,p.boss,p);if(b.boss_type!=="cooldown")throw new Error("시간표형 보스는 컷 등록 대상이 아닙니다.");if(b.boss_scope==="SERVER"&&actor.alliance_level<70&&String(actor.server_id)!==String(b.server_id))throw new Error("자기 서버 보스만 사용할 수 있습니다.");
+  const actor=await botRequireBossAction_(env,aid,p),b=await botBossRow_(env,aid,p.boss,p);if(b.boss_type!=="cooldown"){
+    // Fixed / weekly bosses retain their schedule. A cut starts attendance only.
+    if(b.boss_scope==="SERVER"&&actor.alliance_level<70&&String(actor.server_id)!==String(b.server_id))throw new Error("자기 서버 보스만 사용할 수 있습니다.");
+    let cut=p.cut_at?parseLocalDateTime(p.cut_at):new Date();
+    if(!cut)throw new Error("컷 시각이 올바르지 않습니다.");
+    if(p.cut_at&&isClockInput_(p.cut_at)&&cut.getTime()>Date.now()+300000)cut=new Date(cut.getTime()-86400000);
+    const enabled=boolVal(b.attendance_enabled,true);
+    if(enabled&&await first(env.DB,"SELECT 1 FROM boss_events WHERE alliance_id=? AND boss_id=? AND attendance_status='open'",aid,b.boss_id))throw new Error("이미 출석 진행 중인 보스입니다.");
+    const next=scheduledNext(b,new Date());
+    const nextAt=next&&!Number.isNaN(next.getTime())?next.toISOString():"";
+    const now=nowIso(),source=botSource_(p),actorId=botActorId_(p);
+    let eid="";
+    if(enabled){
+      eid=uid("event");
+      const closes=new Date(Date.now()+10*60000);
+      await run(env.DB,"INSERT INTO boss_events(event_id,alliance_id,boss_id,boss_name,boss_scope,server_id,event_type,cut_at,next_spawn_at,attendance_opened_at,attendance_closes_at,attendance_status,registered_by_discord_user_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",eid,aid,b.boss_id,b.boss_name,b.boss_scope||"WORLD",b.server_id||"",p.cut_at?"past_cut":"cut",cut.toISOString(),nextAt,now,closes.toISOString(),actorId,source,now,now);
+      await queueAttendanceSync_(env,aid,eid,"upsert",source+" scheduled cut");
+      if(source!=="kakao")await queueKakaoAttendanceLive_(env,aid,eid,null,"컷 등록 · 출석 시작");
+    }
+    const srv=b.server_id?await serverMeta(env,aid,b.server_id):null,channels=eid?await botResolveChannels_(env,aid,"attendance",b.boss_scope,b.server_id):[];
+    return {boss_id:b.boss_id,boss_name:b.boss_name,boss_scope:b.boss_scope||"WORLD",server_id:b.server_id||"",server_name:b.boss_scope==="SERVER"?(srv?.server_name||b.server_id):"월드",cut_at:formatKst(cut,false),next_spawn_at:next?formatKst(next,false):"시간표 유지",event_id:eid,attendance_open:!!eid,attendance_channel_id:channels[0]||"",attendance_channel_ids:channels.join(",")};
+  }if(b.boss_scope==="SERVER"&&actor.alliance_level<70&&String(actor.server_id)!==String(b.server_id))throw new Error("자기 서버 보스만 사용할 수 있습니다.");
   let cut=p.cut_at?parseLocalDateTime(p.cut_at):new Date();if(!cut)throw new Error("컷 시각이 올바르지 않습니다.");if(p.cut_at&&isClockInput_(p.cut_at)&&cut.getTime()>Date.now()+300000)cut=new Date(cut.getTime()-86400000);if(boolVal(b.attendance_enabled,true)&&await first(env.DB,"SELECT 1 FROM boss_events WHERE alliance_id=? AND boss_id=? AND attendance_status='open'",aid,b.boss_id))throw new Error("이미 출석 진행 중인 보스입니다.");
   const next=new Date(cut.getTime()+Number(b.respawn_minutes||0)*60000),now=nowIso(),source=botSource_(p),actorId=botActorId_(p);await run(env.DB,"INSERT INTO boss_state(alliance_id,boss_id,boss_scope,server_id,last_kill_at,next_spawn_at,status,registered_by_discord_user_id,source,updated_at,note) VALUES(?,?,?,?,?,?,'대기',?,?,?,'') ON CONFLICT(alliance_id,boss_id) DO UPDATE SET boss_scope=excluded.boss_scope,server_id=excluded.server_id,last_kill_at=excluded.last_kill_at,next_spawn_at=excluded.next_spawn_at,status='대기',registered_by_discord_user_id=excluded.registered_by_discord_user_id,source=excluded.source,updated_at=excluded.updated_at",aid,b.boss_id,b.boss_scope||"WORLD",b.server_id||"",cut.toISOString(),next.toISOString(),actorId,source,now);
   let eid="";if(boolVal(b.attendance_enabled,true)){eid=uid("event");const closes=new Date(Date.now()+10*60000);await run(env.DB,"INSERT INTO boss_events(event_id,alliance_id,boss_id,boss_name,boss_scope,server_id,event_type,cut_at,next_spawn_at,attendance_opened_at,attendance_closes_at,attendance_status,registered_by_discord_user_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",eid,aid,b.boss_id,b.boss_name,b.boss_scope||"WORLD",b.server_id||"",p.cut_at?"past_cut":"cut",cut.toISOString(),next.toISOString(),now,closes.toISOString(),actorId,source,now,now);await queueAttendanceSync_(env,aid,eid,"upsert",source+" cut");if(source!=="kakao")await queueKakaoAttendanceLive_(env,aid,eid,null,"컷 등록 · 출석 시작");}
