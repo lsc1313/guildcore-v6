@@ -15,6 +15,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Check Worker JavaScript syntax
+        run: node --check worker.js
+
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v4
         with:
