@@ -1899,7 +1899,7 @@ async function botMarkAlerts_(env,aid,p){
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
-  if(target==="kakao")await gcKakaoClearLeases_(env,aid,"alert",ids);
+  if(target==="kakao" && status!=="queued")await gcKakaoClearLeases_(env,aid,"alert",ids);
   return {updated:Number(result?.meta?.changes||0),target};
 }
 
@@ -1937,7 +1937,7 @@ async function botMarkAttendanceResults_(env,aid,p){
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE attendance_result_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND result_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
-  if(target==="kakao")await gcKakaoClearLeases_(env,aid,"attendance",ids);
+  if(target==="kakao" && status!=="queued")await gcKakaoClearLeases_(env,aid,"attendance",ids);
   return {updated:Number(result?.meta?.changes||0),target};
 }
 
