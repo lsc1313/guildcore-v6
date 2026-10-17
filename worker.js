@@ -1803,6 +1803,12 @@ async function gcKakaoRecoverLeases_(env,aid,table,type,id){
   // Recover legacy in-flight rows that predate the lease table after a safe delay.
   await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} NOT IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=?) AND ${type==="alert"?"due_at":"created_at"}<?`,aid,aid,type,new Date(Date.now()-120000).toISOString());
 }
+async function gcKakaoClearLeases_(env,aid,type,ids){
+  if(!ids.length)return;
+  await gcKakaoLeaseSchema_(env);
+  const ph=ids.map(()=>"?").join(",");
+  await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND item_id IN (${ph})`,aid,type,...ids);
+}
 async function gcKakaoRecordLease_(env,aid,type,id){
   await run(env.DB,"INSERT OR REPLACE INTO kakao_delivery_lease(alliance_id,queue_type,item_id,claimed_at) VALUES(?,?,?,?)",aid,type,String(id),nowIso());
 }
@@ -1893,6 +1899,7 @@ async function botMarkAlerts_(env,aid,p){
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
+  if(target==="kakao")await gcKakaoClearLeases_(env,aid,"alert",ids);
   return {updated:Number(result?.meta?.changes||0),target};
 }
 
@@ -1930,6 +1937,7 @@ async function botMarkAttendanceResults_(env,aid,p){
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE attendance_result_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND result_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
+  if(target==="kakao")await gcKakaoClearLeases_(env,aid,"attendance",ids);
   return {updated:Number(result?.meta?.changes||0),target};
 }
 
