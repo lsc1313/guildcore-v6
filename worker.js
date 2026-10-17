@@ -1438,6 +1438,22 @@ async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""
   if(!ranking.length)lines.push("해당 기간의 확정 참여기록이 없습니다.");
   return {scope:guildId?"guild":"alliance",guild_id:guildId,start_day:startDay,end_day:endDay,event_count:ev.length,member_count:ranking.length,attendance_count:counts.size,ranking,message:lines.join("\\n"),truncated:ev.length===2000||rows.length===20000};
 }
+async function gcPullKakaoAttendanceReports_(env,aid){
+  await gcAttendanceReportSchema_(env);
+  const rows=await all(env.DB,"SELECT report_id,message,status FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' ORDER BY created_at LIMIT 10",aid);
+  return {reports:rows};
+}
+async function gcMarkKakaoAttendanceReports_(env,aid,p){
+  await gcAttendanceReportSchema_(env);
+  const ids=Array.isArray(p.report_ids)?p.report_ids.slice(0,20):[];
+  const status=String(p.status||"");if(!["sent","failed"].includes(status))throw new Error("잘못된 전송 상태");
+  let updated=0;
+  for(const id of ids){
+    const result=await run(env.DB,"UPDATE kakao_attendance_reports SET status=?,sent_at=?,error=? WHERE alliance_id=? AND report_id=? AND status='queued'",status,status==="sent"?nowIso():null,status==="failed"?String(p.note||"").slice(0,300):"",aid,String(id));
+    updated+=Number(result?.meta?.changes||0);
+  }
+  return {updated};
+}
 async function previewKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=""){return await gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId);}
 async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=""){
   const perm=await attendanceContext(env,aid,guildId,token);if(!perm.can_edit)throw new Error("전송 권한이 없습니다.");const ctx=perm.ctx,p=await gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId);
@@ -2179,6 +2195,8 @@ async function handleDirectKakao_(request,env){
     else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note,room_ids:body.room_ids});
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note,room_ids:body.room_ids});
+    else if(mode==="attendance_reports_pull")data=await gcPullKakaoAttendanceReports_(env,validAid);
+    else if(mode==="attendance_reports_mark")data=await gcMarkKakaoAttendanceReports_(env,validAid,body);
     else if(!mode)data=await botKakaoCommand_(env,validAid,p);
     else return json({ok:false,error:"지원하지 않는 mode: "+mode},400);
     return json({ok:true,data});
