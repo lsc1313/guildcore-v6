@@ -1708,102 +1708,6 @@ async function runDiscordCron(env){
   }
 }
 
-async function handleKakaoHttp(request, env) {
-  if (!env.KAKAO_INPUT_KEY) {
-    return Response.json(
-      { ok:false, error:"KAKAO_INPUT_KEY missing" },
-      { status:500 }
-    );
-  }
-
-  let body;
-  try {
-    body = await request.json();
-  } catch (_) {
-    return Response.json(
-      { ok:false, error:"JSON 형식 오류" },
-      { status:400 }
-    );
-  }
-
-  if (!body || String(body.key || "") !== String(env.KAKAO_INPUT_KEY)) {
-    return Response.json(
-      { ok:false, error:"인증 실패" },
-      { status:401 }
-    );
-  }
-
-  const payload = body.payload || {};
-
-  /* 카톡방 최초 연결: 연합 ID를 강제하지 않고 본체에서 이름/활성 연합으로 찾는다. */
-  if (String(body.mode || "") === "resolve_alliance") {
-    const data = await apiCall(
-      env,
-      "",
-      "kakao_resolve_alliance",
-      { query:String(body.alliance_query || "").trim() },
-      ""
-    );
-    return Response.json({ ok:true, data });
-  }
-
-  /* 카카오 자동알림 폴링/확인. Discord 상태와 별도로 소비한다. */
-  if (String(body.mode || "") === "alerts_pull") {
-    const allianceId = String(body.alliance_id || "").trim();
-    if (!allianceId) return Response.json({ok:false,error:"연합 ID가 없습니다."},{status:400});
-    const data = await apiCall(env, "", "alerts_pull", {
-      limit:Number(body.limit || 20),
-      target:"kakao"
-    }, allianceId);
-    return Response.json({ok:true,data});
-  }
-
-  if (String(body.mode || "") === "alerts_mark") {
-    const allianceId = String(body.alliance_id || "").trim();
-    if (!allianceId) return Response.json({ok:false,error:"연합 ID가 없습니다."},{status:400});
-    const ids = Array.isArray(body.alert_ids) ? body.alert_ids : [];
-    const data = await apiCall(env, "", "alerts_mark", {
-      alert_ids:ids,
-      status:String(body.status || "sent"),
-      note:String(body.note || ""),
-      target:"kakao"
-    }, allianceId);
-    return Response.json({ok:true,data});
-  }
-
-  if (String(body.mode || "") === "attendance_results_pull") {
-    const allianceId=String(body.alliance_id||"").trim();if(!allianceId)return Response.json({ok:false,error:"연합 ID가 없습니다."},{status:400});
-    const data=await apiCall(env,"","attendance_results_pull",{limit:Number(body.limit||20),target:"kakao"},allianceId);return Response.json({ok:true,data});
-  }
-  if (String(body.mode || "") === "attendance_results_mark") {
-    const allianceId=String(body.alliance_id||"").trim();if(!allianceId)return Response.json({ok:false,error:"연합 ID가 없습니다."},{status:400});
-    const data=await apiCall(env,"","attendance_results_mark",{result_ids:Array.isArray(body.result_ids)?body.result_ids:[],status:String(body.status||"sent"),note:String(body.note||""),target:"kakao"},allianceId);return Response.json({ok:true,data});
-  }
-
-  /* 일반 카톡 명령은 방에 저장된 연합 ID가 반드시 있어야 한다. 기본 alliance_001 폴백 금지. */
-  const allianceId = String(body.alliance_id || "").trim();
-  if (!allianceId) {
-    return Response.json(
-      { ok:false, error:"카톡방에 연결된 연합이 없습니다. !핑 연합명 으로 연결하세요." },
-      { status:400 }
-    );
-  }
-
-  const data = await apiCall(
-    env,
-    "",
-    "kakao_command",
-    payload,
-    allianceId
-  );
-
-  if(data&&data.sync_attendance&&data.event_id){
-    const guildIds=await discordGuildIdsForAlliance(env,allianceId);
-    for(const gid of guildIds){try{await syncAttendanceEventNow(env,gid,data.event_id,allianceId);}catch(e){console.log("kakao attendance discord sync error",gid,data.event_id,e.message)}}
-  }
-  return Response.json({ ok:true, data });
-}
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1843,20 +1747,7 @@ export default {
     }
 
     if (request.method === "GET") return new Response("GuildCore Discord Worker v3.34 FULL RESET OK");
-
-    // MessengerBotR -> Cloudflare -> GuildCore_INPUT
-    // Discord interaction endpoint와 분리하여 Discord 서명 검증을 건드리지 않는다.
-    if (request.method === "POST" && url.pathname === "/kakao") {
-      try {
-        return await handleKakaoHttp(request, env);
-      } catch (e) {
-        return Response.json(
-          { ok:false, error:e.message || String(e) },
-          { status:500 }
-        );
-      }
-    }
-
+    // Discord interaction endpoint only. Retired Kakao relay removed.
     if (request.method !== "POST") return new Response("Method Not Allowed", { status:405 });
 
     const body = await request.text();
