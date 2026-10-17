@@ -1624,7 +1624,7 @@ function botDiscordDisplay_(g,nickname){const tag=String(g.discord_tag||g.guild_
 async function botEnsureMember_(env,guildId,nickname,existingMemberId,source){
   if(existingMemberId){const old=await first(env.DB,"SELECT * FROM members WHERE member_id=? AND guild_id=?",String(existingMemberId),String(guildId));if(old){await run(env.DB,"UPDATE members SET nickname=?,status='활성' WHERE member_id=?",nickname,old.member_id);return old.member_id;}}
   const same=await first(env.DB,"SELECT * FROM members WHERE guild_id=? AND nickname=? AND status='활성'",String(guildId),nickname);if(same)return same.member_id;
-  const id=uid("member");await run(env.DB,"INSERT INTO members(member_id,guild_id,nickname,role,alliance_role,joined_at,status,note,web_pin_hash,web_access_enabled) VALUES(?,?,?,'길드원','',?,'활성',?,'',0)",id,String(guildId),nickname,nowIso(),source==="kakao"?"Kakao 등록":"Discord 등록");return id;
+  const id=uid("member");await run(env.DB,"INSERT INTO members(member_id,guild_id,nickname,role,alliance_role,joined_at,status,note,web_pin_hash,web_access_enabled) VALUES(?,?,?,'길드원','',?,'활성',?,'',0) ON CONFLICT(guild_id,nickname) DO NOTHING",id,String(guildId),nickname,nowIso(),source==="kakao"?"Kakao 등록":"Discord 등록");const resolved=await first(env.DB,"SELECT member_id FROM members WHERE guild_id=? AND nickname=?",String(guildId),nickname);if(!resolved)throw new Error("길드원 등록 결과를 확인하지 못했습니다.");return resolved.member_id;
 }
 async function botRegisterDiscordMember_(env,aid,p){
   const user=String(p.discord_user_id||"").trim(),username=String(p.discord_username||"").trim(),gid=String(p.guild_id||"").trim(),nick=String(p.game_nickname||"").trim();if(!user||!gid||!nick)throw new Error("Discord ID, 길드, 게임 닉네임이 필요합니다.");
