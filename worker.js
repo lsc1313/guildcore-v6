@@ -2026,8 +2026,8 @@ async function handleBotApi(request,env){
 }
 
 
-/* Optional direct Kakao endpoint. The old Discord /kakao relay remains live until cutover.
-   Uses a separate KAKAO_INPUT_KEY secret; never accepts the bot bridge key from phones. */
+/* Direct Kakao endpoint. Kakao clients connect here without Discord relay.
+   Uses KAKAO_INPUT_KEY; Discord bot bridge credentials remain separate. */
 async function handleDirectKakao_(request,env){
   if(!env.KAKAO_INPUT_KEY)return json({ok:false,error:"KAKAO_INPUT_KEY is not configured on GuildCore"},503);
   let body={};try{body=await request.json()}catch{return json({ok:false,error:"JSON 형식 오류"},400)}
