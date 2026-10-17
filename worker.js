@@ -1792,6 +1792,21 @@ async function botGuildStats_(env,aid,p){const a=await botActor_(env,aid,p),r=aw
 async function botSettlement_(env,aid,p){const a=await botActor_(env,aid,p),stats=await getGuildStats(env,a.guild_id,p.start_date,p.end_date),start=parseLocalDateTime(`${p.start_date} 00:00`),end=parseLocalDateTime(`${p.end_date} 23:59`);if(!start||!end)throw new Error("기간 형식이 올바르지 않습니다.");const sales=await first(env.DB,"SELECT COALESCE(SUM(COALESCE(sale_amount,0)),0) total_sales,COALESCE(SUM(COALESCE(distribution_pool,0)),0) total_pool FROM loot WHERE guild_id=? AND COALESCE(NULLIF(completed_at,''),created_at)>=? AND COALESCE(NULLIF(completed_at,''),created_at)<=?",a.guild_id,start.toISOString(),end.toISOString());return {guild_id:a.guild_id,total_sales:Number(sales?.total_sales||0),total_pool:Number(sales?.total_pool||0),total_raids:stats.total_raids,ranking:stats.ranking,allocation_mode:"미설정",note:"정산 공식은 아직 확정하지 않았습니다. 판매금액과 참여기록만 집계합니다."};}
 
 
+async function gcKakaoLeaseSchema_(env){
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
+}
+async function gcKakaoRecoverLeases_(env,aid,table,type,id){
+  await gcKakaoLeaseSchema_(env);
+  const cutoff=new Date(Date.now()-120000).toISOString();
+  await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?)`,aid,aid,type,cutoff);
+  await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?`,aid,type,cutoff);
+  // Recover legacy in-flight rows that predate the lease table after a safe delay.
+  await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} NOT IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=?) AND ${type==="alert"?"due_at":"created_at"}<?`,aid,aid,type,new Date(Date.now()-120000).toISOString());
+}
+async function gcKakaoRecordLease_(env,aid,type,id){
+  await run(env.DB,"INSERT OR REPLACE INTO kakao_delivery_lease(alliance_id,queue_type,item_id,claimed_at) VALUES(?,?,?,?)",aid,type,String(id),nowIso());
+}
+
 async function botPullAlerts_(env,aid,p){
   /* 소비자가 폴링하는 순간에도 현재 시각 기준 알림을 생성한다.
      ROOT cron -> 소비자 cron 두 단계 지연을 줄여 10/5/1분 알림을 제시간에 가깝게 보낸다. */
@@ -1802,7 +1817,7 @@ async function botPullAlerts_(env,aid,p){
   // The client retains per-room delivery receipts and suppresses repeat sends.
   // Kakao reads are non-destructive: client confirms delivery after each room has been processed.
   // No 'sending' lease can become permanently stranded after a device/network interruption.
-  if(target==="kakao")await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND due_at < ?",aid,new Date(Date.now()-120000).toISOString());
+  if(target==="kakao")await gcKakaoRecoverLeases_(env,aid,"boss_alert_queue","alert","alert_id");
   const rows=await all(env.DB,`SELECT * FROM boss_alert_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY due_at,created_at LIMIT 200`,aid),live=[];
   const seen=new Set();
   for(const x of rows){
@@ -1841,6 +1856,7 @@ async function botPullAlerts_(env,aid,p){
     if(target==="kakao"){
       const claim=await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='sending' WHERE alliance_id=? AND alert_id=? AND kakao_status='queued'",aid,x.alert_id);
       if(Number(claim?.meta?.changes||0)!==1)continue;
+      await gcKakaoRecordLease_(env,aid,"alert",x.alert_id);
     }
     let eventId="",attendanceIds=[];
     if(type==="spawn"){
@@ -1884,7 +1900,7 @@ async function botPullAttendanceResults_(env,aid,p){
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20)));
   // Kakao reads are non-destructive: client confirms delivery after each room has been processed.
   // No 'sending' lease can become permanently stranded after a device/network interruption.
-  if(target==="kakao")await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND created_at < ?",aid,new Date(Date.now()-120000).toISOString());
+  if(target==="kakao")await gcKakaoRecoverLeases_(env,aid,"attendance_result_queue","attendance","result_id");
   const rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,limit),results=[];
   const seen=new Set();
   for(const x of rows){
@@ -1898,7 +1914,7 @@ async function botPullAttendanceResults_(env,aid,p){
       const sent=await first(env.DB,"SELECT result_id FROM attendance_result_queue WHERE alliance_id=? AND event_id=? AND message=? AND kakao_status='sent' LIMIT 1",aid,x.event_id,x.message);
       if(sent){await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);continue;}
     }
-    if(target==="kakao"){const claimed=await run(env.DB,"UPDATE attendance_result_queue SET kakao_status=\'sending\' WHERE alliance_id=? AND result_id=? AND kakao_status=\'queued\'",aid,x.result_id);if(Number(claimed?.meta?.changes||0)!==1)continue;}
+    if(target==="kakao"){const claimed=await run(env.DB,"UPDATE attendance_result_queue SET kakao_status=\'sending\' WHERE alliance_id=? AND result_id=? AND kakao_status=\'queued\'",aid,x.result_id);if(Number(claimed?.meta?.changes||0)!==1)continue;await gcKakaoRecordLease_(env,aid,"attendance",x.result_id);}
     const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id),links=e?botParseEventDiscordLinks_(e.note):[],fallback=e?await botResolveChannels_(env,aid,"attendance",e.boss_scope||"WORLD",e.server_id||""):[];
     results.push({result_id:x.result_id,event_id:x.event_id,event_type:e?.event_type||"",boss_name:x.boss_name,boss_scope:x.boss_scope||"WORLD",server_id:x.server_id||"",server_name:x.server_name||"",message:x.message||"",discord_message_id:x.discord_message_id||e?.discord_message_id||"",discord_channel_id:x.discord_channel_id||e?.discord_channel_id||"",discord_message_links:links,discord_channel_ids:fallback.join(",")});
   }
