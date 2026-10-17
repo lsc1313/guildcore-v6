@@ -1414,9 +1414,45 @@ async function processScheduled(env){
   return {ok:true,attendance_closed:expired.length};
 }
 
+
+/* Manual attendance report: isolated from boss-alert and attendance-result queues. */
+async function gcAttendanceReportSchema_(env){
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_attendance_reports(report_id TEXT PRIMARY KEY,alliance_id TEXT NOT NULL,start_day TEXT NOT NULL,end_day TEXT NOT NULL,content_hash TEXT NOT NULL,message TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',created_at TEXT NOT NULL,sent_at TEXT,requested_by TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '')");
+  await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_kakao_attendance_reports_alliance ON kakao_attendance_reports(alliance_id,created_at)");
+}
+async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token){
+  await requireAllianceOperate(env,token,aid);
+  const valid=x=>/^\\d{4}-\\d{2}-\\d{2}$/.test(String(x||""));
+  if(!valid(startDay)||!valid(endDay))throw new Error("조회 기간을 YYYY-MM-DD로 입력하세요.");
+  const start=parseLocalDateTime(startDay+" 00:00"),end=parseLocalDateTime(endDay+" 23:59");
+  if(!start||!end||end<start||end.getTime()-start.getTime()>366*86400000)throw new Error("조회 기간은 최대 366일입니다.");
+  const ev=await all(env.DB,"SELECT event_id,boss_name,cut_at FROM boss_events WHERE alliance_id=? AND cut_at>=? AND cut_at<=? AND attendance_status='closed' ORDER BY cut_at,event_id LIMIT 2000",aid,start.toISOString(),end.toISOString());
+  const rows=await all(env.DB,"SELECT a.event_id,a.member_id_at_event,a.game_nickname_at_event,a.guild_name_at_event FROM boss_attendance a JOIN boss_events e ON e.event_id=a.event_id WHERE e.alliance_id=? AND e.cut_at>=? AND e.cut_at<=? AND e.attendance_status='closed' AND a.attended=1 LIMIT 20000",aid,start.toISOString(),end.toISOString());
+  const counts=new Map();
+  for(const a of rows){const id=String(a.member_id_at_event||a.game_nickname_at_event||"");const key=id+"|"+String(a.event_id);if(!id||counts.has(key))continue;counts.set(key,a);}
+  const byMember=new Map();
+  for(const a of counts.values()){const key=String(a.member_id_at_event||a.game_nickname_at_event),v=byMember.get(key)||{name:String(a.game_nickname_at_event||"이름없음"),guild:String(a.guild_name_at_event||""),count:0};v.count++;byMember.set(key,v);}
+  const ranking=[...byMember.values()].sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name,"ko"));
+  const lines=["📊 [GuildCore] 연합 보스 참여기록", "기간: "+startDay+" ~ "+endDay,"종료된 보스 회차: "+ev.length+"회","참여 인원: "+ranking.length+"명","총 참여: "+counts.size+"회",""];
+  ranking.forEach((v,i)=>lines.push((i+1)+". "+v.name+(v.guild?" ("+v.guild+")":"")+" — "+v.count+"회"));
+  if(!ranking.length)lines.push("해당 기간의 확정 참여기록이 없습니다.");
+  return {start_day:startDay,end_day:endDay,event_count:ev.length,member_count:ranking.length,attendance_count:counts.size,ranking,message:lines.join("\\n"),truncated:ev.length===2000||rows.length===20000};
+}
+async function previewKakaoAttendanceReport(env,aid,startDay,endDay,token){return await gcAttendanceReportBuild_(env,aid,startDay,endDay,token);}
+async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token){
+  const ctx=await requireAllianceOperate(env,token,aid),p=await gcAttendanceReportBuild_(env,aid,startDay,endDay,token);
+  if(p.truncated)throw new Error("조회 결과가 너무 많습니다. 기간을 줄여 주세요.");
+  await gcAttendanceReportSchema_(env);
+  const last=await first(env.DB,"SELECT report_id,status FROM kakao_attendance_reports WHERE alliance_id=? AND start_day=? AND end_day=? AND message=? AND status IN ('queued','sending','sent') ORDER BY created_at DESC LIMIT 1",aid,startDay,endDay,p.message);
+  if(last)return {ok:true,duplicate:true,report_id:last.report_id,status:last.status,message:"동일 보고서가 이미 등록되어 있습니다."};
+  const id=uid("kreport");await run(env.DB,"INSERT INTO kakao_attendance_reports(report_id,alliance_id,start_day,end_day,content_hash,message,status,created_at,requested_by) VALUES(?,?,?,?,?,?,?,?,?)",id,aid,startDay,endDay,String(p.message.length),p.message,"queued",nowIso(),String(ctx.member_id||"admin"));
+  return {ok:true,duplicate:false,report_id:id,status:"queued",message:"카톡 전송 대기열에 등록했습니다."};
+}
+async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOperate(env,token,aid);await gcAttendanceReportSchema_(env);return await all(env.DB,"SELECT report_id,start_day,end_day,status,created_at,sent_at,error FROM kakao_attendance_reports WHERE alliance_id=? ORDER BY created_at DESC LIMIT 50",aid);}
+
 const RPC = {
   webLogin, webWhoAmI, webLogout, issueAllianceLeaderBootstrapPin,
-  getAllianceHomeData, getGuildAppData, getAdminStructure, saveLobbyTheme, getMyAttendanceSummary, saveAttendanceWeekRule, listAllianceFaq, saveAllianceFaq, deleteAllianceFaq,
+  getAllianceHomeData, getGuildAppData, getAdminStructure, previewKakaoAttendanceReport, queueKakaoAttendanceReport, listKakaoAttendanceReports, saveLobbyTheme, getMyAttendanceSummary, saveAttendanceWeekRule, listAllianceFaq, saveAllianceFaq, deleteAllianceFaq,
   createAllianceWorkspace, renameAlliance, deactivateAlliance, restoreAlliance, deleteAlliancePermanently,
   createGuildWorkspace, renameGuild, updateGuildServer, deactivateGuild, restoreGuild, deleteGuildPermanently,
   saveAllianceNotice, updateAllianceNotice, deleteAllianceNotice, saveGuildNotice, deleteGuildNotice,
