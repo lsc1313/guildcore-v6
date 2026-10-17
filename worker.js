@@ -1867,7 +1867,18 @@ async function botPeekKakaoAlerts_(env,aid,p){
   });
   return {mode:"read_only",queue_modified:false,alerts};
 }
-async function botMarkAlerts_(env,aid,p){const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",sent=target+"_sent_at",ids=Array.isArray(p.alert_ids)?p.alert_ids.map(String):[];if(!ids.length)return {updated:0,target};const ph=ids.map(()=>"?").join(","),status=String(p.status||"sent");await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph})`,status,status==="sent"?nowIso():"",String(p.note||""),String(p.note||""),aid,...ids);return {updated:ids.length,target};}
+async function botMarkAlerts_(env,aid,p){
+  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord";
+  const key=target+"_status",sent=target+"_sent_at";
+  const ids=Array.isArray(p.alert_ids)?[...new Set(p.alert_ids.map(String).filter(Boolean))]:[];
+  if(!ids.length)return {updated:0,target};
+  const status=String(p.status||"sent");
+  if(!["sent","queued","expired"].includes(status))throw new Error("Invalid delivery status");
+  const ph=ids.map(()=>"?").join(",");
+  const note=String(p.note||"");
+  const result=await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
+  return {updated:Number(result?.meta?.changes||0),target};
+}
 
 async function botPullAttendanceResults_(env,aid,p){
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20)));
@@ -1893,7 +1904,18 @@ async function botPullAttendanceResults_(env,aid,p){
   }
   return {target,results};
 }
-async function botMarkAttendanceResults_(env,aid,p){const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",sent=target+"_sent_at",ids=Array.isArray(p.result_ids)?p.result_ids.map(String):[];if(!ids.length)return {updated:0,target};const ph=ids.map(()=>"?").join(","),status=String(p.status||"sent");await run(env.DB,`UPDATE attendance_result_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND result_id IN (${ph})`,status,status==="sent"?nowIso():"",String(p.note||""),String(p.note||""),aid,...ids);return {updated:ids.length,target};}
+async function botMarkAttendanceResults_(env,aid,p){
+  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord";
+  const key=target+"_status",sent=target+"_sent_at";
+  const ids=Array.isArray(p.result_ids)?[...new Set(p.result_ids.map(String).filter(Boolean))]:[];
+  if(!ids.length)return {updated:0,target};
+  const status=String(p.status||"sent");
+  if(!["sent","queued","expired"].includes(status))throw new Error("Invalid delivery status");
+  const ph=ids.map(()=>"?").join(",");
+  const note=String(p.note||"");
+  const result=await run(env.DB,`UPDATE attendance_result_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND result_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
+  return {updated:Number(result?.meta?.changes||0),target};
+}
 
 function botBossNextLabel_(b){
   const next=String(b?.next_spawn_at||"");
