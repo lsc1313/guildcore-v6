@@ -1956,17 +1956,11 @@ async function handleBotApi(request,env){
   const bearer=request.headers.get("Authorization")?.replace(/^Bearer\s+/i,"")||"",received=String(bearer||body.key||"");
   // Preserve the currently configured mobile bot key; add an optional, independent PC bridge secret.
   const legacyKey=String(env.BOT_API_KEY||env.GUILDCORE_API_KEY||env.GUILDCORE_BRIDGE_KEY||"");
-  const pcKey=String(env.GUILDCORE_PC_API_KEY||"");
-  if(!legacyKey&&!pcKey)return json({ok:false,error:"봇 API 인증키가 설정되지 않았습니다."},500);
-  // Allow the existing mobile bot and the independent PC credential.
-  if(!received||!((legacyKey&&received===legacyKey)||(pcKey&&received===pcKey)))return json({ok:false,error:"인증 실패"},401);
+  // PC Kakao bridge credentials are intentionally not accepted.
+  if(!legacyKey)return json({ok:false,error:"봇 API 인증키가 설정되지 않았습니다."},500);
+  if(!received||received!==legacyKey)return json({ok:false,error:"인증 실패"},401);
   try{
     const action=String(body.action||"").trim(),p=body.payload||{},discordServerId=String(body.discord_server_id||"");
-    // The mobile bot is the sole Kakao sender. Keep PC bridge polling in standby to avoid duplicate posts.
-    if(pcKey&&received===pcKey&&(!legacyKey||received!==legacyKey)&&String(p.target||"discord").toLowerCase()==="kakao"){
-      if(action==="alerts_pull"||action==="attendance_results_pull")return json({ok:true,data:{target:"kakao",alerts:[],results:[],standby:true}});
-      if(action==="alerts_mark"||action==="attendance_results_mark")return json({ok:true,data:{target:"kakao",updated:0,standby:true}});
-    }
     if(action==="kakao_resolve_alliance")return json({ok:true,data:await botResolveAllianceQuery_(env,p.query||"")});
     if(action==="discord_alliance_list")return json({ok:true,data:await botListAlliances_(env)});
     if(action==="discord_bind_alliance")return json({ok:true,data:await botBindAlliance_(env,discordServerId,p.query||"")});
