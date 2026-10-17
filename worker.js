@@ -1792,6 +1792,22 @@ async function botGuildStats_(env,aid,p){const a=await botActor_(env,aid,p),r=aw
 async function botSettlement_(env,aid,p){const a=await botActor_(env,aid,p),stats=await getGuildStats(env,a.guild_id,p.start_date,p.end_date),start=parseLocalDateTime(`${p.start_date} 00:00`),end=parseLocalDateTime(`${p.end_date} 23:59`);if(!start||!end)throw new Error("기간 형식이 올바르지 않습니다.");const sales=await first(env.DB,"SELECT COALESCE(SUM(COALESCE(sale_amount,0)),0) total_sales,COALESCE(SUM(COALESCE(distribution_pool,0)),0) total_pool FROM loot WHERE guild_id=? AND COALESCE(NULLIF(completed_at,''),created_at)>=? AND COALESCE(NULLIF(completed_at,''),created_at)<=?",a.guild_id,start.toISOString(),end.toISOString());return {guild_id:a.guild_id,total_sales:Number(sales?.total_sales||0),total_pool:Number(sales?.total_pool||0),total_raids:stats.total_raids,ranking:stats.ranking,allocation_mode:"미설정",note:"정산 공식은 아직 확정하지 않았습니다. 판매금액과 참여기록만 집계합니다."};}
 
 
+async function gcKakaoRoomReceiptSchema_(env){
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_room_delivery (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, room_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id,room_id))");
+}
+async function gcKakaoRoomReceipt_(env,aid,p){
+  const type=String(p.queue_type||"");
+  const item=String(p.item_id||"");
+  const room=String(p.room_id||"");
+  const status=String(p.status||"");
+  if(!["alert","attendance"].includes(type)||!item||!room||room.length>256||!["sent","failed"].includes(status))throw new Error("Invalid Kakao room delivery receipt");
+  await gcKakaoRoomReceiptSchema_(env);
+  const table=type==="alert"?"boss_alert_queue":"attendance_result_queue",col=type==="alert"?"alert_id":"result_id";
+  const exists=await first(env.DB,`SELECT ${col} AS id FROM ${table} WHERE alliance_id=? AND ${col}=?`,aid,item);
+  if(!exists)throw new Error("Unknown Kakao delivery item");
+  await run(env.DB,"INSERT INTO kakao_room_delivery(alliance_id,queue_type,item_id,room_id,status,attempts,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(alliance_id,queue_type,item_id,room_id) DO UPDATE SET status=CASE WHEN kakao_room_delivery.status='sent' THEN 'sent' ELSE excluded.status END,attempts=kakao_room_delivery.attempts+1,updated_at=excluded.updated_at",aid,type,item,room,status,nowIso());
+  return {recorded:true,queue_type:type,item_id:item,room_id:room,status};
+}
 async function gcKakaoLeaseSchema_(env){
   await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
 }
@@ -2098,7 +2114,8 @@ async function handleDirectKakao_(request,env){
     const found=await botResolveAlliance_(env,{alliance_id:aid});
     const validAid=String(found.alliance_id);
     let data;
-    if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
+    if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
+    else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note});
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note});
