@@ -1797,7 +1797,11 @@ async function botPullAlerts_(env,aid,p){
      ROOT cron -> 소비자 cron 두 단계 지연을 줄여 10/5/1분 알림을 제시간에 가깝게 보낸다. */
   const current=new Date();
   await generateDueBossAlerts_(env,current);
-  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),now=current.getTime(),rows=await all(env.DB,`SELECT * FROM boss_alert_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY due_at,created_at LIMIT 200`,aid),live=[];
+  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),now=current.getTime();
+  // Recover interrupted Kakao polls; never leave a queue item permanently in 'sending'.
+  // The client retains per-room delivery receipts and suppresses repeat sends.
+  if(target==="kakao")await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND due_at <= ?",aid,new Date(now-75000).toISOString());
+  const rows=await all(env.DB,`SELECT * FROM boss_alert_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY due_at,created_at LIMIT 200`,aid),live=[];
   const seen=new Set();
   for(const x of rows){
     const due=new Date(x.due_at),spawn=new Date(x.spawn_at),type=String(x.alert_type||"");
@@ -1864,7 +1868,9 @@ async function botPeekKakaoAlerts_(env,aid,p){
 async function botMarkAlerts_(env,aid,p){const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",sent=target+"_sent_at",ids=Array.isArray(p.alert_ids)?p.alert_ids.map(String):[];if(!ids.length)return {updated:0,target};const ph=ids.map(()=>"?").join(","),status=String(p.status||"sent");await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph})`,status,status==="sent"?nowIso():"",String(p.note||""),String(p.note||""),aid,...ids);return {updated:ids.length,target};}
 
 async function botPullAttendanceResults_(env,aid,p){
-  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,limit),results=[];
+  const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20)));
+  if(target==="kakao")await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND created_at <= ?",aid,new Date(Date.now()-75000).toISOString());
+  const rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,limit),results=[];
   const seen=new Set();
   for(const x of rows){
     if(target==="kakao"){
