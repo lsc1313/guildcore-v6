@@ -1800,6 +1800,8 @@ async function gcKakaoRecoverLeases_(env,aid,table,type,id){
   const cutoff=new Date(Date.now()-120000).toISOString();
   await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?)`,aid,aid,type,cutoff);
   await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?`,aid,type,cutoff);
+  // Remove orphan leases from already acknowledged or expired queue items.
+  await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND item_id IN (SELECT ${id} FROM ${table} WHERE alliance_id=? AND kakao_status IN ('sent','expired'))`,aid,type,aid);
   // Recover legacy in-flight rows that predate the lease table after a safe delay.
   await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} NOT IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=?) AND ${type==="alert"?"due_at":"created_at"}<?`,aid,aid,type,new Date(Date.now()-120000).toISOString());
 }
