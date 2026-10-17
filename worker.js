@@ -1800,7 +1800,9 @@ async function botPullAlerts_(env,aid,p){
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),now=current.getTime();
   // Recover interrupted Kakao polls; never leave a queue item permanently in 'sending'.
   // The client retains per-room delivery receipts and suppresses repeat sends.
-  if(target==="kakao")await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND due_at <= ?",aid,new Date(now-75000).toISOString());
+  // Kakao reads are non-destructive: client confirms delivery after each room has been processed.
+  // No 'sending' lease can become permanently stranded after a device/network interruption.
+  await run(env.DB,"UPDATE boss_alert_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending'",aid);
   const rows=await all(env.DB,`SELECT * FROM boss_alert_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY due_at,created_at LIMIT 200`,aid),live=[];
   const seen=new Set();
   for(const x of rows){
@@ -1869,7 +1871,9 @@ async function botMarkAlerts_(env,aid,p){const target=String(p.target||"discord"
 
 async function botPullAttendanceResults_(env,aid,p){
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20)));
-  if(target==="kakao")await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND created_at <= ?",aid,new Date(Date.now()-75000).toISOString());
+  // Kakao reads are non-destructive: client confirms delivery after each room has been processed.
+  // No 'sending' lease can become permanently stranded after a device/network interruption.
+  await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending'",aid);
   const rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,limit),results=[];
   const seen=new Set();
   for(const x of rows){
