@@ -1808,6 +1808,15 @@ async function gcKakaoRoomReceipt_(env,aid,p){
   await run(env.DB,"INSERT INTO kakao_room_delivery(alliance_id,queue_type,item_id,room_id,status,attempts,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(alliance_id,queue_type,item_id,room_id) DO UPDATE SET status=CASE WHEN kakao_room_delivery.status='sent' THEN 'sent' ELSE excluded.status END,attempts=kakao_room_delivery.attempts+1,updated_at=excluded.updated_at",aid,type,item,room,status,nowIso());
   return {recorded:true,queue_type:type,item_id:item,room_id:room,status};
 }
+async function gcKakaoRoomReceiptsGet_(env,aid,p){
+  const type=String(p.queue_type||"");
+  const ids=Array.isArray(p.item_ids)?[...new Set(p.item_ids.map(String).filter(Boolean))].slice(0,100):[];
+  if(!["alert","attendance"].includes(type)||!ids.length)return {receipts:[]};
+  await gcKakaoRoomReceiptSchema_(env);
+  const ph=ids.map(()=>"?").join(",");
+  const receipts=await all(env.DB,`SELECT item_id,room_id,status FROM kakao_room_delivery WHERE alliance_id=? AND queue_type=? AND item_id IN (${ph})`,aid,type,...ids);
+  return {receipts};
+}
 async function gcKakaoLeaseSchema_(env){
   await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
 }
@@ -2115,6 +2124,7 @@ async function handleDirectKakao_(request,env){
     const validAid=String(found.alliance_id);
     let data;
     if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
+    else if(mode==="room_delivery_get")data=await gcKakaoRoomReceiptsGet_(env,validAid,body);
     else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note});
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
