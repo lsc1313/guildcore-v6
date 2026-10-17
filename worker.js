@@ -1817,6 +1817,17 @@ async function gcKakaoRoomReceiptsGet_(env,aid,p){
   const receipts=await all(env.DB,`SELECT item_id,room_id,status FROM kakao_room_delivery WHERE alliance_id=? AND queue_type=? AND item_id IN (${ph})`,aid,type,...ids);
   return {receipts};
 }
+async function gcKakaoAssertRoomReceipts_(env,aid,type,ids,roomIds){
+  const rooms=Array.isArray(roomIds)?[...new Set(roomIds.map(String).filter(Boolean))]:[];
+  if(!rooms.length||rooms.length>100)throw new Error("Kakao sent requires room_ids");
+  await gcKakaoRoomReceiptSchema_(env);
+  for(const item of ids){
+    const ph=rooms.map(()=>"?").join(",");
+    const rows=await all(env.DB,`SELECT room_id,status FROM kakao_room_delivery WHERE alliance_id=? AND queue_type=? AND item_id=? AND room_id IN (${ph})`,aid,type,item,...rooms);
+    const sent=new Set(rows.filter(x=>x.status==="sent").map(x=>String(x.room_id)));
+    if(rooms.some(room=>!sent.has(room)))throw new Error("Kakao room delivery confirmation incomplete");
+  }
+}
 async function gcKakaoLeaseSchema_(env){
   await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
 }
@@ -1923,6 +1934,7 @@ async function botMarkAlerts_(env,aid,p){
   if(!ids.length)return {updated:0,target};
   const status=String(p.status||"sent");
   if(!["sent","queued","expired"].includes(status))throw new Error("Invalid delivery status");
+  if(target==="kakao"&&status==="sent")await gcKakaoAssertRoomReceipts_(env,aid,"alert",ids,p.room_ids);
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE boss_alert_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND alert_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
@@ -1961,6 +1973,7 @@ async function botMarkAttendanceResults_(env,aid,p){
   if(!ids.length)return {updated:0,target};
   const status=String(p.status||"sent");
   if(!["sent","queued","expired"].includes(status))throw new Error("Invalid delivery status");
+  if(target==="kakao"&&status==="sent")await gcKakaoAssertRoomReceipts_(env,aid,"attendance",ids,p.room_ids);
   const ph=ids.map(()=>"?").join(",");
   const note=String(p.note||"");
   const result=await run(env.DB,`UPDATE attendance_result_queue SET ${key}=?,${sent}=?,note=CASE WHEN ?<>'' THEN ? ELSE note END WHERE alliance_id=? AND result_id IN (${ph}) AND ${key} IN ('sending','queued')`,status,status==="sent"?nowIso():"",note,note,aid,...ids);
@@ -2126,9 +2139,9 @@ async function handleDirectKakao_(request,env){
     if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
     else if(mode==="room_delivery_get")data=await gcKakaoRoomReceiptsGet_(env,validAid,body);
     else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
-    else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note});
+    else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note,room_ids:body.room_ids});
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
-    else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note});
+    else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note,room_ids:body.room_ids});
     else if(!mode)data=await botKakaoCommand_(env,validAid,p);
     else return json({ok:false,error:"지원하지 않는 mode: "+mode},400);
     return json({ok:true,data});
