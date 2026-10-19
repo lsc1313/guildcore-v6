@@ -1446,6 +1446,7 @@ async function gcRegisterKakaoRoom_(env,aid,p){
   if(!room||room.length>256||!["alliance","guild"].includes(type))throw new Error("Invalid room binding");
   let server="";
   if(type==="guild"){
+    if(!guild)throw new Error("Guild room requires a guild");
     const g=await first(env.DB,"SELECT server_id FROM guilds WHERE alliance_id=? AND guild_id=? AND status='active'",aid,guild);
     if(!g||!g.server_id)throw new Error("Guild is not active in this alliance");
     server=String(g.server_id);
