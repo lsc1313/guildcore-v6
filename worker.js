@@ -1445,7 +1445,8 @@ async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   // A guild report must be pulled only by its exact bound room.
   const roomId=String(p.room_id||"").trim();
   const supportsGuildRouting=p.guild_routing_v1===true;
-  if(!supportsGuildRouting||!roomId){
+  if(supportsGuildRouting&&!roomId)return {reports:[]};
+  if(!supportsGuildRouting){
     const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid);
     return {reports:rows};
   }
