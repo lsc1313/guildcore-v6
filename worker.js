@@ -1419,9 +1419,11 @@ async function processScheduled(env){
 async function gcAttendanceReportSchema_(env){
   await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_attendance_reports(report_id TEXT PRIMARY KEY,alliance_id TEXT NOT NULL,start_day TEXT NOT NULL,end_day TEXT NOT NULL,content_hash TEXT NOT NULL,message TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',created_at TEXT NOT NULL,sent_at TEXT,requested_by TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '')");
   await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_kakao_attendance_reports_alliance ON kakao_attendance_reports(alliance_id,created_at)");
+  const cols=await all(env.DB,"PRAGMA table_info(kakao_attendance_reports)");
+  if(!cols.some(c=>c.name==="target_guild_id"))await run(env.DB,"ALTER TABLE kakao_attendance_reports ADD COLUMN target_guild_id TEXT NOT NULL DEFAULT ''");
 }
 async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""){
-  if(guildId)throw new Error("길드 카톡전송은 준비 중입니다.");const perm=await attendanceContext(env,aid,"",token);if(!perm.can_edit)throw new Error("해당 범위의 참여기록 전송 권한이 없습니다.");
+  const perm=await attendanceContext(env,aid,guildId,token);if(!perm.can_edit)throw new Error("해당 범위의 참여기록 전송 권한이 없습니다.");
   const valid=x=>/^\d{4}-\d{2}-\d{2}$/.test(String(x||""));
   if(!valid(startDay)||!valid(endDay))throw new Error("조회 기간을 YYYY-MM-DD로 입력하세요.");
   const start=parseLocalDateTime(startDay+" 00:00"),end=parseLocalDateTime(endDay+" 23:59");
@@ -1438,10 +1440,51 @@ async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""
   if(!ranking.length)lines.push("해당 기간의 확정 참여기록이 없습니다.");
   return {scope:guildId?"guild":"alliance",guild_id:guildId,start_day:startDay,end_day:endDay,event_count:ev.length,member_count:ranking.length,attendance_count:counts.size,ranking,message:lines.join("\n"),truncated:ev.length===2000||rows.length===20000};
 }
-async function gcPullKakaoAttendanceReports_(env,aid){
+async function gcRegisterKakaoRoom_(env,aid,p){
+  const room=String(p.room_id||"").trim(),type=String(p.room_type||"").trim();
+  const guild=String(p.guild_id||"").trim();
+  if(!room||room.length>256||!["alliance","guild"].includes(type))throw new Error("Invalid room binding");
+  let server="";
+  if(type==="guild"){
+    if(!guild)throw new Error("Guild room requires a guild");
+    const g=await first(env.DB,"SELECT server_id FROM guilds WHERE alliance_id=? AND guild_id=? AND status='active'",aid,guild);
+    if(!g||!g.server_id)throw new Error("Guild is not active in this alliance");
+    server=String(g.server_id);
+  }else if(guild)throw new Error("Alliance room cannot include a guild");
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_room_bindings_v2(binding_id TEXT PRIMARY KEY,alliance_id TEXT NOT NULL,room_id TEXT NOT NULL,room_type TEXT NOT NULL,guild_id TEXT NOT NULL DEFAULT '',server_id TEXT NOT NULL DEFAULT '',send_alias TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(alliance_id,room_id))");
+  const old=await first(env.DB,"SELECT binding_id,send_alias FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=?",aid,room);
+  const now=nowIso(),alias=String(p.send_alias||"").slice(0,256);
+  await run(env.DB,"INSERT INTO kakao_room_bindings_v2(binding_id,alliance_id,room_id,room_type,guild_id,server_id,send_alias,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?) ON CONFLICT(alliance_id,room_id) DO UPDATE SET room_type=excluded.room_type,guild_id=excluded.guild_id,server_id=excluded.server_id,active=1,updated_at=excluded.updated_at",String(old?.binding_id||uid("kroom")),aid,room,type,type==="guild"?guild:"",server,String(old?.send_alias||alias),now,now);
+  return {room_id:room,room_type:type,guild_id:type==="guild"?guild:"",server_id:server};
+}
+async function gcUnregisterKakaoRoom_(env,aid,p){
+  const room=String(p.room_id||"").trim();
+  if(!room||room.length>256)throw new Error("Invalid Kakao room ID");
+  const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");
+  if(!table)return {updated:0};
+  const result=await run(env.DB,"UPDATE kakao_room_bindings_v2 SET active=0,updated_at=? WHERE alliance_id=? AND room_id=?",nowIso(),aid,room);
+  return {updated:Number(result?.meta?.changes||0)};
+}
+async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   await gcAttendanceReportSchema_(env);
-  const rows=await all(env.DB,"SELECT report_id,message,status FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' ORDER BY created_at LIMIT 10",aid);
-  return {reports:rows};
+  // A guild report must be pulled only by its exact bound room.
+  const roomId=String(p.room_id||"").trim();
+  const supportsGuildRouting=p.guild_routing_v1===true;
+  if(supportsGuildRouting&&!roomId)return {reports:[]};
+  if(!supportsGuildRouting){
+    const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid);
+    return {reports:rows};
+  }
+  const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");
+  if(!table)return {reports:[]};
+  const binding=await first(env.DB,"SELECT room_type,guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND active=1 LIMIT 1",aid,roomId);
+  if(!binding)return {reports:[]};
+  const type=String(binding.room_type||"");
+  if(type==="alliance"){
+    return {reports:await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid)};
+  }
+  if(type!=="guild"||!binding.guild_id)return {reports:[]};
+  return {reports:await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id=? ORDER BY created_at LIMIT 10",aid,String(binding.guild_id))};
 }
 async function gcMarkKakaoAttendanceReports_(env,aid,p){
   await gcAttendanceReportSchema_(env);
@@ -1449,6 +1492,14 @@ async function gcMarkKakaoAttendanceReports_(env,aid,p){
   const status=String(p.status||"");if(!["sent","failed"].includes(status))throw new Error("잘못된 전송 상태");
   let updated=0;
   for(const id of ids){
+    const row=await first(env.DB,"SELECT target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND report_id=? AND status='queued'",aid,String(id));
+    if(!row)continue;
+    if(row.target_guild_id){
+      const roomId=String(p.room_id||"").trim();
+      if(!roomId)throw new Error("길드 보고서는 대상 카톡방 확인이 필요합니다.");
+      const binding=await first(env.DB,"SELECT guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND room_type='guild' AND active=1",aid,roomId);
+      if(!binding||String(binding.guild_id)!==String(row.target_guild_id))throw new Error("길드 보고서의 대상 카톡방이 일치하지 않습니다.");
+    }
     const result=await run(env.DB,"UPDATE kakao_attendance_reports SET status=?,sent_at=?,error=? WHERE alliance_id=? AND report_id=? AND status='queued'",status,status==="sent"?nowIso():null,status==="failed"?String(p.note||"").slice(0,300):"",aid,String(id));
     updated+=Number(result?.meta?.changes||0);
   }
@@ -1456,12 +1507,13 @@ async function gcMarkKakaoAttendanceReports_(env,aid,p){
 }
 async function previewKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=""){return await gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId);}
 async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=""){
-  if(guildId)throw new Error("길드 카톡전송은 준비 중입니다.");const perm=await attendanceContext(env,aid,"",token);if(!perm.can_edit)throw new Error("전송 권한이 없습니다.");const ctx=perm.ctx,p=await gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId);
+  const perm=await attendanceContext(env,aid,guildId,token);if(!perm.can_edit)throw new Error("전송 권한이 없습니다.");const ctx=perm.ctx,p=await gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId);
   if(p.truncated)throw new Error("조회 결과가 너무 많습니다. 기간을 줄여 주세요.");
   await gcAttendanceReportSchema_(env);
-  const last=await first(env.DB,"SELECT report_id,status FROM kakao_attendance_reports WHERE alliance_id=? AND start_day=? AND end_day=? AND message=? AND status IN ('queued','sending','sent') ORDER BY created_at DESC LIMIT 1",aid,startDay,endDay,p.message);
+  if(guildId){const g=await guildMeta(env,guildId);if(String(g.alliance_id)!==String(aid))throw new Error("다른 연합 길드입니다.");const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");if(!table)throw new Error("길드 카톡방 연결 기능이 아직 활성화되지 않았습니다.");const bound=await first(env.DB,"SELECT room_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND guild_id=? AND room_type='guild' AND active=1 LIMIT 1",aid,String(guildId));if(!bound)throw new Error("해당 길드의 카톡방이 연결되지 않았습니다. 먼저 길드방에서 !핑 연합명 길드명을 실행하세요.");}
+  const last=await first(env.DB,"SELECT report_id,status FROM kakao_attendance_reports WHERE alliance_id=? AND start_day=? AND end_day=? AND message=? AND target_guild_id=? AND status IN ('queued','sending','sent') ORDER BY created_at DESC LIMIT 1",aid,startDay,endDay,p.message,String(guildId||""));
   if(last)return {ok:true,duplicate:true,report_id:last.report_id,status:last.status,message:"동일 보고서가 이미 등록되어 있습니다."};
-  const id=uid("kreport");await run(env.DB,"INSERT INTO kakao_attendance_reports(report_id,alliance_id,start_day,end_day,content_hash,message,status,created_at,requested_by) VALUES(?,?,?,?,?,?,?,?,?)",id,aid,startDay,endDay,String(p.message.length),p.message,"queued",nowIso(),String(ctx.member_id||"admin"));
+  const id=uid("kreport");await run(env.DB,"INSERT INTO kakao_attendance_reports(report_id,alliance_id,start_day,end_day,content_hash,message,status,created_at,requested_by,target_guild_id) VALUES(?,?,?,?,?,?,?,?,?,?)",id,aid,startDay,endDay,String(p.message.length),p.message,"queued",nowIso(),String(ctx.member_id||"admin"),String(guildId||""));
   return {ok:true,duplicate:false,report_id:id,status:"queued",message:"카톡 전송 대기열에 등록했습니다."};
 }
 async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOperate(env,token,aid);await gcAttendanceReportSchema_(env);return await all(env.DB,"SELECT report_id,start_day,end_day,status,created_at,sent_at,error FROM kakao_attendance_reports WHERE alliance_id=? ORDER BY created_at DESC LIMIT 50",aid);}
@@ -2199,13 +2251,16 @@ async function handleDirectKakao_(request,env){
     const found=await botResolveAlliance_(env,{alliance_id:aid});
     const validAid=String(found.alliance_id);
     let data;
-    if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
+    if(mode==="room_register")data=await gcRegisterKakaoRoom_(env,validAid,body);
+    else if(mode==="room_unregister")data=await gcUnregisterKakaoRoom_(env,validAid,body);
+    else if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
     else if(mode==="room_delivery_get")data=await gcKakaoRoomReceiptsGet_(env,validAid,body);
     else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note,room_ids:body.room_ids});
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note,room_ids:body.room_ids});
-    else if(mode==="attendance_reports_pull")data=await gcPullKakaoAttendanceReports_(env,validAid);
+    else if(mode==="guild_lookup"){const name=String(body.guild_name||"").trim();const guilds=await all(env.DB,"SELECT guild_id,guild_name,server_id FROM guilds WHERE alliance_id=? AND status='active' AND guild_name=?",validAid,name);if(guilds.length!==1)throw new Error("해당 연합에서 길드를 정확히 찾을 수 없습니다.");data={guild:guilds[0]};}
+    else if(mode==="attendance_reports_pull")data=await gcPullKakaoAttendanceReports_(env,validAid,body);
     else if(mode==="attendance_reports_mark")data=await gcMarkKakaoAttendanceReports_(env,validAid,body);
     else if(!mode)data=await botKakaoCommand_(env,validAid,p);
     else return json({ok:false,error:"지원하지 않는 mode: "+mode},400);

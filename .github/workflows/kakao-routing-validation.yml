@@ -1,0 +1,21 @@
+name: Kakao routing validation
+on:
+  pull_request:
+    paths:
+      - 'worker.js'
+      - 'kakao-routing/**'
+      - '.github/workflows/kakao-routing-validation.yml'
+  workflow_dispatch:
+jobs:
+  routing-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Worker syntax
+        run: node --check worker.js
+      - name: Routing tests
+        run: |
+          node --test kakao-routing/*.test.mjs
