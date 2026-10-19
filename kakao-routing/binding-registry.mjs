@@ -26,9 +26,9 @@ export async function saveKakaoBinding(db, record) {
   if (alias.length > 256) throw new Error('Alias too long');
   // Validate membership using existing authoritative tables, not client input.
   if (type === 'guild') {
-    const member = await db.prepare('SELECT guild_id FROM guilds WHERE guild_id=? AND alliance_id=?').bind(guild,aid).first();
+    const member = await db.prepare('SELECT guild_id,server_id FROM guilds WHERE guild_id=? AND alliance_id=? AND status='active'').bind(guild,aid).first();
     const srv = await db.prepare('SELECT server_id FROM alliance_servers WHERE server_id=? AND alliance_id=? AND enabled=1').bind(server,aid).first();
-    if (!member || !srv) throw new Error('Guild or server not in alliance');
+    if (!member || !srv || String(member.server_id || '') !== server) throw new Error('Guild/server mismatch or not in alliance');
   }
   const now = new Date().toISOString();
   const bindingId = 'kakao_' + crypto.randomUUID();
