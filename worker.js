@@ -1466,6 +1466,14 @@ async function gcMarkKakaoAttendanceReports_(env,aid,p){
   const status=String(p.status||"");if(!["sent","failed"].includes(status))throw new Error("잘못된 전송 상태");
   let updated=0;
   for(const id of ids){
+    const row=await first(env.DB,"SELECT target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND report_id=? AND status='queued'",aid,String(id));
+    if(!row)continue;
+    if(row.target_guild_id){
+      const roomId=String(p.room_id||"").trim();
+      if(!roomId)throw new Error("길드 보고서는 대상 카톡방 확인이 필요합니다.");
+      const binding=await first(env.DB,"SELECT guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND room_type='guild' AND active=1",aid,roomId);
+      if(!binding||String(binding.guild_id)!==String(row.target_guild_id))throw new Error("길드 보고서의 대상 카톡방이 일치하지 않습니다.");
+    }
     const result=await run(env.DB,"UPDATE kakao_attendance_reports SET status=?,sent_at=?,error=? WHERE alliance_id=? AND report_id=? AND status='queued'",status,status==="sent"?nowIso():null,status==="failed"?String(p.note||"").slice(0,300):"",aid,String(id));
     updated+=Number(result?.meta?.changes||0);
   }
