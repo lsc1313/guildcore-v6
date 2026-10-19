@@ -1440,6 +1440,22 @@ async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""
   if(!ranking.length)lines.push("해당 기간의 확정 참여기록이 없습니다.");
   return {scope:guildId?"guild":"alliance",guild_id:guildId,start_day:startDay,end_day:endDay,event_count:ev.length,member_count:ranking.length,attendance_count:counts.size,ranking,message:lines.join("\n"),truncated:ev.length===2000||rows.length===20000};
 }
+async function gcRegisterKakaoRoom_(env,aid,p){
+  const room=String(p.room_id||"").trim(),type=String(p.room_type||"").trim();
+  const guild=String(p.guild_id||"").trim();
+  if(!room||room.length>256||!["alliance","guild"].includes(type))throw new Error("Invalid room binding");
+  let server="";
+  if(type==="guild"){
+    const g=await first(env.DB,"SELECT server_id FROM guilds WHERE alliance_id=? AND guild_id=? AND status='active'",aid,guild);
+    if(!g||!g.server_id)throw new Error("Guild is not active in this alliance");
+    server=String(g.server_id);
+  }else if(guild)throw new Error("Alliance room cannot include a guild");
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_room_bindings_v2(binding_id TEXT PRIMARY KEY,alliance_id TEXT NOT NULL,room_id TEXT NOT NULL,room_type TEXT NOT NULL,guild_id TEXT NOT NULL DEFAULT '',server_id TEXT NOT NULL DEFAULT '',send_alias TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(alliance_id,room_id))");
+  const old=await first(env.DB,"SELECT binding_id,send_alias FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=?",aid,room);
+  const now=nowIso(),alias=String(p.send_alias||"").slice(0,256);
+  await run(env.DB,"INSERT INTO kakao_room_bindings_v2(binding_id,alliance_id,room_id,room_type,guild_id,server_id,send_alias,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?) ON CONFLICT(alliance_id,room_id) DO UPDATE SET room_type=excluded.room_type,guild_id=excluded.guild_id,server_id=excluded.server_id,active=1,updated_at=excluded.updated_at",String(old?.binding_id||uid("kroom")),aid,room,type,type==="guild"?guild:"",server,String(old?.send_alias||alias),now,now);
+  return {room_id:room,room_type:type,guild_id:type==="guild"?guild:"",server_id:server};
+}
 async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   await gcAttendanceReportSchema_(env);
   // A guild report must be pulled only by its exact bound room.
@@ -2226,7 +2242,8 @@ async function handleDirectKakao_(request,env){
     const found=await botResolveAlliance_(env,{alliance_id:aid});
     const validAid=String(found.alliance_id);
     let data;
-    if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
+    if(mode==="room_register")data=await gcRegisterKakaoRoom_(env,validAid,body);
+    else if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
     else if(mode==="room_delivery_get")data=await gcKakaoRoomReceiptsGet_(env,validAid,body);
     else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="alerts_mark")data=await botMarkAlerts_(env,validAid,{target:"kakao",alert_ids:body.alert_ids,status:body.status,note:body.note,room_ids:body.room_ids});
