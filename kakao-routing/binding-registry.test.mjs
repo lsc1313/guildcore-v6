@@ -41,6 +41,9 @@ await saveKakaoBinding(db,{alliance_id:'a1',room_id:'r2',room_type:'guild',guild
 assert.equal((await listKakaoBindings(db,'a1')).find(x=>x.room_id==='r2').active,1);
 await assert.rejects(saveKakaoBinding(db,{alliance_id:'a1',room_id:'bad',room_type:'guild',guild_id:'g2',server_id:'s1'}));
 await assert.rejects(saveKakaoBinding(db,{alliance_id:'a1',room_id:'bad',room_type:'guild',guild_id:'g1',server_id:'s2'}));
+// A valid server ID alone must not allow binding a guild from another server.
+const mismatchedDb={prepare(sql){return {bind(){return {async first(){return sql.includes('FROM guilds')?{guild_id:'g1',server_id:'s2'}:{server_id:'s1'};}};}}}};
+await assert.rejects(saveKakaoBinding(mismatchedDb,{alliance_id:'a1',room_id:'wrong-server',room_type:'guild',guild_id:'g1',server_id:'s1'}),/mismatch/);
 await assert.rejects(saveKakaoBinding(db,{alliance_id:'a1',room_id:'bad',room_type:'alliance',server_id:'s1'}));
 assert.equal((await listKakaoBindings(db,'a1')).length,2);
 console.log('Kakao binding registry mock tests passed');
