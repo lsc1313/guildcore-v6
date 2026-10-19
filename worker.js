@@ -1456,6 +1456,14 @@ async function gcRegisterKakaoRoom_(env,aid,p){
   await run(env.DB,"INSERT INTO kakao_room_bindings_v2(binding_id,alliance_id,room_id,room_type,guild_id,server_id,send_alias,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?) ON CONFLICT(alliance_id,room_id) DO UPDATE SET room_type=excluded.room_type,guild_id=excluded.guild_id,server_id=excluded.server_id,active=1,updated_at=excluded.updated_at",String(old?.binding_id||uid("kroom")),aid,room,type,type==="guild"?guild:"",server,String(old?.send_alias||alias),now,now);
   return {room_id:room,room_type:type,guild_id:type==="guild"?guild:"",server_id:server};
 }
+async function gcUnregisterKakaoRoom_(env,aid,p){
+  const room=String(p.room_id||"").trim();
+  if(!room||room.length>256)throw new Error("Invalid Kakao room ID");
+  const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");
+  if(!table)return {updated:0};
+  const result=await run(env.DB,"UPDATE kakao_room_bindings_v2 SET active=0,updated_at=? WHERE alliance_id=? AND room_id=?",nowIso(),aid,room);
+  return {updated:Number(result?.meta?.changes||0)};
+}
 async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   await gcAttendanceReportSchema_(env);
   // A guild report must be pulled only by its exact bound room.
@@ -2243,6 +2251,7 @@ async function handleDirectKakao_(request,env){
     const validAid=String(found.alliance_id);
     let data;
     if(mode==="room_register")data=await gcRegisterKakaoRoom_(env,validAid,body);
+    else if(mode==="room_unregister")data=await gcUnregisterKakaoRoom_(env,validAid,body);
     else if(mode==="room_delivery_mark")data=await gcKakaoRoomReceipt_(env,validAid,body);
     else if(mode==="room_delivery_get")data=await gcKakaoRoomReceiptsGet_(env,validAid,body);
     else if(mode==="alerts_pull")data=await botPullAlerts_(env,validAid,{target:"kakao",limit:body.limit});
