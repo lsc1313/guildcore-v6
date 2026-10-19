@@ -1442,11 +1442,23 @@ async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""
 }
 async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   await gcAttendanceReportSchema_(env);
-  // Older Kakao clients broadcast every report to every connected room.
-  // Never expose guild-scoped reports to those clients.
+  // A guild report must be pulled only by its exact bound room.
+  const roomId=String(p.room_id||"").trim();
   const supportsGuildRouting=p.guild_routing_v1===true;
-  const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued'"+(supportsGuildRouting?"":" AND target_guild_id=''")+" ORDER BY created_at LIMIT 10",aid);
-  return {reports:rows};
+  if(!supportsGuildRouting||!roomId){
+    const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid);
+    return {reports:rows};
+  }
+  const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");
+  if(!table)return {reports:[]};
+  const binding=await first(env.DB,"SELECT room_type,guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND active=1 LIMIT 1",aid,roomId);
+  if(!binding)return {reports:[]};
+  const type=String(binding.room_type||"");
+  if(type==="alliance"){
+    return {reports:await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid)};
+  }
+  if(type!=="guild"||!binding.guild_id)return {reports:[]};
+  return {reports:await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id=? ORDER BY created_at LIMIT 10",aid,String(binding.guild_id))};
 }
 async function gcMarkKakaoAttendanceReports_(env,aid,p){
   await gcAttendanceReportSchema_(env);
