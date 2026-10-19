@@ -7,7 +7,7 @@ function stmt(sql) {
     state.queries.push({sql,args});
     return {
       async first() {
-        if (sql.includes('FROM guilds')) return args[0] === 'g1' && args[1] === 'a1' ? {guild_id:'g1'} : null;
+        if (sql.includes('FROM guilds')) return args[0] === 'g1' && args[1] === 'a1' ? {guild_id:'g1',server_id:'s1'} : null;
         if (sql.includes('FROM alliance_servers')) return args[0] === 's1' && args[1] === 'a1' ? {server_id:'s1'} : null;
         throw Error('Unexpected first query');
       },
