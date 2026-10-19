@@ -1440,9 +1440,12 @@ async function gcAttendanceReportBuild_(env,aid,startDay,endDay,token,guildId=""
   if(!ranking.length)lines.push("해당 기간의 확정 참여기록이 없습니다.");
   return {scope:guildId?"guild":"alliance",guild_id:guildId,start_day:startDay,end_day:endDay,event_count:ev.length,member_count:ranking.length,attendance_count:counts.size,ranking,message:lines.join("\n"),truncated:ev.length===2000||rows.length===20000};
 }
-async function gcPullKakaoAttendanceReports_(env,aid){
+async function gcPullKakaoAttendanceReports_(env,aid,p={}){
   await gcAttendanceReportSchema_(env);
-  const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' ORDER BY created_at LIMIT 10",aid);
+  // Older Kakao clients broadcast every report to every connected room.
+  // Never expose guild-scoped reports to those clients.
+  const supportsGuildRouting=p.guild_routing_v1===true;
+  const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued'"+(supportsGuildRouting?"":" AND target_guild_id=''")+" ORDER BY created_at LIMIT 10",aid);
   return {reports:rows};
 }
 async function gcMarkKakaoAttendanceReports_(env,aid,p){
@@ -2209,7 +2212,7 @@ async function handleDirectKakao_(request,env){
     else if(mode==="attendance_results_pull")data=await botPullAttendanceResults_(env,validAid,{target:"kakao",limit:body.limit});
     else if(mode==="attendance_results_mark")data=await botMarkAttendanceResults_(env,validAid,{target:"kakao",result_ids:body.result_ids,status:body.status,note:body.note,room_ids:body.room_ids});
     else if(mode==="guild_lookup"){const name=String(body.guild_name||"").trim();const guilds=await all(env.DB,"SELECT guild_id,guild_name,server_id FROM guilds WHERE alliance_id=? AND status='active' AND guild_name=?",validAid,name);if(guilds.length!==1)throw new Error("해당 연합에서 길드를 정확히 찾을 수 없습니다.");data={guild:guilds[0]};}
-    else if(mode==="attendance_reports_pull")data=await gcPullKakaoAttendanceReports_(env,validAid);
+    else if(mode==="attendance_reports_pull")data=await gcPullKakaoAttendanceReports_(env,validAid,body);
     else if(mode==="attendance_reports_mark")data=await gcMarkKakaoAttendanceReports_(env,validAid,body);
     else if(!mode)data=await botKakaoCommand_(env,validAid,p);
     else return json({ok:false,error:"지원하지 않는 mode: "+mode},400);
