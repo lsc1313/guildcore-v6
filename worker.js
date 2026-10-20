@@ -1160,7 +1160,7 @@ async function geminiScreenshotApiCall_(env,parts,pass,deadline){
       const text=await res.text();let parsed={};try{parsed=JSON.parse(text)}catch{}
       if(res.ok){data=parsed;model=m;break;}
       const msg=parsed&&parsed.error&&parsed.error.message?parsed.error.message:text.slice(0,300);lastErr=`Gemini API ${res.status} (${m}): ${msg}`;
-      if(![408,429,500,502,503,504].includes(res.status))throw new Error(lastErr);
+      if(res.status===400&&/user location is not supported|location is not supported|unsupported country|unsupported region/i.test(msg)){throw new Error("Gemini API 지역 제한으로 스크린샷 분석이 차단되었습니다. API 키의 Google AI Studio 이용 가능 지역 및 Cloudflare Worker 호출 위치를 확인해야 합니다. 모델을 바꿔도 해결되지 않을 수 있습니다.");}if(![408,429,500,502,503,504].includes(res.status))throw new Error(lastErr);
     }catch(err){
       if(err&&err.name==="AbortError")lastErr=`Gemini 응답 시간초과 (${m}, ${Math.round(ms/1000)}초)`;
       else if(String(err&&err.message||"").startsWith("Gemini API "))throw err;
