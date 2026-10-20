@@ -1146,6 +1146,17 @@ function geminiResultText_(result){
   if(Array.isArray(parts))return parts.map(p=>String(p&&p.text||"")).join("").trim();
   return "";
 }
+async function cloudflareScreenshotFallback_(env,parts,deadline){
+  if(!env.AI)throw new Error("Cloudflare Workers AI 바인딩이 없습니다.");
+  const prompt=parts.filter(p=>p.text).map(p=>p.text).join("\n");
+  const imgs=parts.filter(p=>p.inlineData).slice(0,2);
+  if(!imgs.length)throw new Error("분석할 이미지가 없습니다.");
+  const messages=[{role:"user",content:[{type:"text",text:prompt},...imgs.map(p=>({type:"image_url",image_url:{url:"data:"+p.inlineData.mimeType+";base64,"+p.inlineData.data}}))]}];
+  const remain=Number(deadline||0)-Date.now();if(remain<4000)throw new Error("대체 분석 남은 시간이 부족합니다.");
+  const result=await Promise.race([env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct",{messages,max_tokens:2000,temperature:0}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Cloudflare AI 응답 시간초과")),Math.min(remain-1000,24000)))]);
+  const raw=String(result&&result.response||"").trim();if(!raw)throw new Error("Cloudflare AI 응답이 비어 있습니다.");
+  return {raw:raw.replace(/```[a-z]*|```/gi,"").trim(),model:"cloudflare/llama-3.2-11b-vision",api_calls:1};
+}
 async function geminiScreenshotApiCall_(env,parts,pass,deadline){
   const body={contents:[{role:"user",parts}],generationConfig:{mediaResolution:"MEDIA_RESOLUTION_HIGH",maxOutputTokens:3000,temperature:0}};
   const primary=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim()||"gemini-3.8-flash";
@@ -1160,7 +1171,7 @@ async function geminiScreenshotApiCall_(env,parts,pass,deadline){
       const text=await res.text();let parsed={};try{parsed=JSON.parse(text)}catch{}
       if(res.ok){data=parsed;model=m;break;}
       const msg=parsed&&parsed.error&&parsed.error.message?parsed.error.message:text.slice(0,300);lastErr=`Gemini API ${res.status} (${m}): ${msg}`;
-      if(res.status===400&&/user location is not supported|location is not supported|unsupported country|unsupported region/i.test(msg)){throw new Error("Gemini API 지역 제한으로 스크린샷 분석이 차단되었습니다. API 키의 Google AI Studio 이용 가능 지역 및 Cloudflare Worker 호출 위치를 확인해야 합니다. 모델을 바꿔도 해결되지 않을 수 있습니다.");}if(![408,429,500,502,503,504].includes(res.status))throw new Error(lastErr);
+      if(res.status===400&&/user location is not supported|location is not supported|unsupported country|unsupported region/i.test(msg)){try{return await cloudflareScreenshotFallback_(env,parts,deadline)}catch(fallbackError){throw new Error("Gemini 지역 제한 / Cloudflare AI 대체 분석 실패: "+String(fallbackError&&fallbackError.message||fallbackError))}}if(![408,429,500,502,503,504].includes(res.status))throw new Error(lastErr);
     }catch(err){
       if(err&&err.name==="AbortError")lastErr=`Gemini 응답 시간초과 (${m}, ${Math.round(ms/1000)}초)`;
       else if(String(err&&err.message||"").startsWith("Gemini API "))throw err;
