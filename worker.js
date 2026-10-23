@@ -1192,25 +1192,38 @@ async function openRouterScreenshotVision_(env,parts,deadline){
   throw new Error("OpenRouter 무료 비전 분석 실패: "+last);
 }
 async function geminiScreenshotApiCall_(env,parts,pass,deadline){
-  const body={contents:[{role:"user",parts}],generationConfig:{mediaResolution:"MEDIA_RESOLUTION_HIGH",maxOutputTokens:3000,temperature:0}};
-  const model=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim()||"gemini-3.8-flash";
-  let reason="Gemini 연결 실패";
-  // Preserve enough of the request budget for the independent fallback engine.
-  const remain=Number(deadline||0)-Date.now();
-  if(env.GEMINI_API_KEY&&remain>16000){
-    const ms=Math.min(10000,Math.max(4000,remain-15000)),controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ms);
+  if(!env.GEMINI_API_KEY)throw new Error("Gemini API 키 없음");
+  const configured=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim();
+  const models=[...new Set([configured,"gemini-3.6-flash","gemini-3.5-flash-lite"].filter(Boolean))];
+  const body={contents:[{role:"user",parts}],generationConfig:{maxOutputTokens:2200,temperature:0}};
+  const failures=[];
+  for(const model of models){
+    const remain=Number(deadline||0)-Date.now();
+    // Keep a little time for remaining models; no independent provider until Gemini models are tried.
+    if(remain<4500)break;
+    const ms=Math.min(13500,Math.max(3500,remain-2500));
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ms);
     try{
-      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":String(env.GEMINI_API_KEY)},body:JSON.stringify(body),signal:controller.signal});
-      const text=await res.text();let parsed={};try{parsed=JSON.parse(text)}catch{}
-      if(res.ok){const raw=geminiResultText_(parsed);if(raw)return {raw:String(raw).replace(/```[a-z]*|```/gi,"").trim(),model,api_calls:1};reason="Gemini 응답이 비어 있습니다."}
-      else reason=`Gemini HTTP ${res.status}: ${String(parsed&&parsed.error&&parsed.error.message||text).slice(0,140)}`;
-    }catch(e){reason=e&&e.name==="AbortError"?"Gemini 10초 이내 응답 없음":String(e&&e.message||e)}
+      const res=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent",{
+        method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":String(env.GEMINI_API_KEY)},
+        body:JSON.stringify(body),signal:controller.signal
+      });
+      const responseText=await res.text();let parsed={};try{parsed=JSON.parse(responseText)}catch{}
+      if(res.ok){
+        const raw=geminiResultText_(parsed);
+        if(raw)return {raw:String(raw).replace(/```[a-z]*|```/gi,"").trim(),model,api_calls:failures.length+1};
+        failures.push(model+": 빈 응답");
+      }else{
+        const detail=String(parsed&&parsed.error&&parsed.error.message||responseText).slice(0,120);
+        failures.push(model+": HTTP "+res.status+" "+detail);
+        // Invalid key / restricted location affects every model, so don't waste requests.
+        if(res.status===401||res.status===403||/API key not valid|location is not supported/i.test(detail))break;
+      }
+    }catch(e){failures.push(model+": "+(e&&e.name==="AbortError"?"응답 시간초과":String(e&&e.message||e)))}
     finally{clearTimeout(timer)}
-  }else if(!env.GEMINI_API_KEY)reason="Gemini API 키 없음";
-  try{const result=await cloudflareScreenshotFallback_(env,parts,deadline);return {...result,api_calls:result.api_calls+1}}
-  catch(e){throw new Error("Gemini 실패 ("+reason+") / 대체 이미지 분석 실패: "+String(e&&e.message||e))}
+  }
+  throw new Error("Gemini 모델 순차 분석 실패: "+failures.join(" / "));
 }
-
 function parseGeminiScreenshotPass_(raw,candidates,keyMap){
   const memberIds=new Set(),uncertain=[],notes=[],seenLines=new Set();let verify=false,parsedAny=false;
   const addUncertain=(t)=>{t=String(t||"").trim();if(t&&!seenLines.has(t)){seenLines.add(t);uncertain.push({text:t});}};
@@ -1244,10 +1257,10 @@ async function geminiAnalyzeScreenshotPass_(env,images,candidates,context,pass,d
   if(!env.GEMINI_API_KEY)throw new Error("GEMINI_API_KEY secret이 설정되지 않았습니다. Google AI Studio 무료 API 키를 ROOT Worker Secret에 추가하세요.");
   const bundle=await geminiScreenshotBundleViews_(env,images,pass),r=geminiScreenshotRoster_(candidates),prompt=geminiScreenshotPrompt_(r.roster,context,bundle.valid.length,pass,confirmedKeys),parts=[{text:prompt}];
   for(const v of bundle.views)parts.push({inlineData:{mimeType:String(v.mime_type||"image/jpeg"),data:String(v.data||"")}});
-  // Dedicated GuildCore Gemini project is primary. OpenRouter is a last-resort fallback only.
   let api,geminiError="";
   try{api=await geminiScreenshotApiCall_(env,parts,pass,deadline)}catch(e){geminiError=String(e&&e.message||e)}
-  if(!api&&env.OPENROUTER_API_KEY&&deadline-Date.now()>5000){try{api=await openRouterScreenshotVision_(env,parts,deadline)}catch(e){throw new Error("Gemini: "+geminiError+" / OpenRouter: "+String(e&&e.message||e))}}
+  if(!api&&env.AI&&deadline-Date.now()>4500){try{api=await cloudflareScreenshotFallback_(env,parts,deadline)}catch(e){geminiError+=" / Cloudflare: "+String(e&&e.message||e)}}
+  if(!api&&env.OPENROUTER_API_KEY&&deadline-Date.now()>9000){try{api=await openRouterScreenshotVision_(env,parts,deadline)}catch(e){geminiError+=" / OpenRouter: "+String(e&&e.message||e)}}
   if(!api)throw new Error(geminiError||"이미지 분석 서비스 응답 없음");
   const parsed=parseGeminiScreenshotPass_(api.raw,candidates,r.keyMap);
   return {...parsed,model:api.model,api_calls:api.api_calls,view_count:bundle.views.length,image_count:bundle.valid.length,keyed:r.keyed};
