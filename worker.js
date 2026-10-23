@@ -1153,7 +1153,17 @@ async function cloudflareScreenshotFallback_(env,parts,deadline){
   if(!imgs.length)throw new Error("분석할 이미지가 없습니다.");
   const messages=[{role:"user",content:[{type:"text",text:prompt},...imgs.map(p=>({type:"image_url",image_url:{url:"data:"+p.inlineData.mimeType+";base64,"+p.inlineData.data}}))]}];
   const remain=Number(deadline||0)-Date.now();if(remain<4000)throw new Error("대체 분석 남은 시간이 부족합니다.");
-  const result=await Promise.race([env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct",{messages,max_tokens:2000,temperature:0}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Cloudflare AI 응답 시간초과")),Math.min(remain-1000,24000)))]);
+  const model="@cf/meta/llama-3.2-11b-vision-instruct";
+  const infer=()=>env.AI.run(model,{messages,max_tokens:2000,temperature:0});
+  const timed=(promise)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Cloudflare AI 응답 시간초과")),Math.max(1000,Math.min(Number(deadline||0)-Date.now()-1000,24000))))]);
+  let result;
+  try{result=await timed(infer())}
+  catch(err){
+    if(!/5016|submit the prompt ['"]agree['"]|not agreed to llama/i.test(String(err&&err.message||err)))throw err;
+    // The account owner approved Meta's model terms; register the required one-time agreement.
+    await timed(env.AI.run(model,{prompt:"agree"}));
+    result=await timed(infer());
+  }
   const raw=String(result&&result.response||"").trim();if(!raw)throw new Error("Cloudflare AI 응답이 비어 있습니다.");
   return {raw:raw.replace(/```[a-z]*|```/gi,"").trim(),model:"cloudflare/llama-3.2-11b-vision",api_calls:1};
 }
