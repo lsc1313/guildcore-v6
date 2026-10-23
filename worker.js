@@ -1129,11 +1129,8 @@ async function geminiScreenshotBundleViews_(env,images,pass=1){
     }
     return {valid,views:out};
   }
-  /* 한 장 분석은 기존 고정밀 확대뷰 방식을 유지한다. */
-  for(let i=0;i<valid.length;i++){
-    const mode=pass===2?"pass2":"full",views=await geminiScreenshotViews_(env,valid[i],mode,false);
-    for(const v of views)out.push({...v,label:`img${i+1}-${v.label}`});
-  }
+  /* Single screenshot: one original image. Avoid sending many high-resolution crops to free vision providers. */
+  for(let i=0;i<valid.length;i++)out.push({label:`img${i+1}-original`,data:String(valid[i].data||""),mime_type:String(valid[i].mime_type||"image/jpeg"),note:"source image"});
   return {valid,views:out};
 }
 function geminiScreenshotRoster_(candidates){
@@ -1182,9 +1179,9 @@ async function openRouterScreenshotVision_(env,parts,deadline){
   let last="";
   for(const model of [...new Set(models)]){
     if(remaining()<6000)break;
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(15000,remaining()-1500));
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(26000,remaining()-1500));
     try{
-      const res=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers,body:JSON.stringify({model,messages:[{role:"user",content}],temperature:0,max_tokens:2200}),signal:controller.signal});
+      const res=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers,body:JSON.stringify({model,messages:[{role:"user",content}],temperature:0,max_tokens:1300}),signal:controller.signal});
       const j=await res.json();
       if(!res.ok){last=model+" HTTP "+res.status+" "+String(j.error&&j.error.message||"").slice(0,120);continue;}
       const raw=j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
