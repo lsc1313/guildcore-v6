@@ -1159,29 +1159,24 @@ async function cloudflareScreenshotFallback_(env,parts,deadline){
 }
 async function geminiScreenshotApiCall_(env,parts,pass,deadline){
   const body={contents:[{role:"user",parts}],generationConfig:{mediaResolution:"MEDIA_RESOLUTION_HIGH",maxOutputTokens:3000,temperature:0}};
-  const primary=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim()||"gemini-3.8-flash";
-  const models=[primary,"gemini-3.5-flash","gemini-3.1-flash-lite"].filter((v,i,a)=>v&&a.indexOf(v)===i);
-  const base=pass===1?[26000,11000,7000]:[18000,8000,6000];
-  let data=null,model="",lastErr="",apiCalls=0;
-  for(let mi=0;mi<models.length;mi++){
-    const remain=Number(deadline||0)-Date.now();if(remain<5000)break;
-    const m=models[mi],ms=Math.max(4000,Math.min(base[Math.min(mi,base.length-1)],remain-1500)),controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ms);apiCalls++;
+  const model=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim()||"gemini-3.8-flash";
+  let reason="Gemini 연결 실패";
+  // Preserve enough of the request budget for the independent fallback engine.
+  const remain=Number(deadline||0)-Date.now();
+  if(env.GEMINI_API_KEY&&remain>16000){
+    const ms=Math.min(10000,Math.max(4000,remain-15000)),controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ms);
     try{
-      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":String(env.GEMINI_API_KEY)},body:JSON.stringify(body),signal:controller.signal});
+      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":String(env.GEMINI_API_KEY)},body:JSON.stringify(body),signal:controller.signal});
       const text=await res.text();let parsed={};try{parsed=JSON.parse(text)}catch{}
-      if(res.ok){data=parsed;model=m;break;}
-      const msg=parsed&&parsed.error&&parsed.error.message?parsed.error.message:text.slice(0,300);lastErr=`Gemini API ${res.status} (${m}): ${msg}`;
-      if(res.status===400&&/user location is not supported|location is not supported|unsupported country|unsupported region/i.test(msg)){try{return await cloudflareScreenshotFallback_(env,parts,deadline)}catch(fallbackError){throw new Error("Gemini 지역 제한 / Cloudflare AI 대체 분석 실패: "+String(fallbackError&&fallbackError.message||fallbackError))}}if(![408,429,500,502,503,504].includes(res.status))throw new Error(lastErr);
-    }catch(err){
-      if(err&&err.name==="AbortError")lastErr=`Gemini 응답 시간초과 (${m}, ${Math.round(ms/1000)}초)`;
-      else if(String(err&&err.message||"").startsWith("Gemini API "))throw err;
-      else lastErr=`Gemini 호출 실패 (${m}): ${String(err&&err.message||err)}`;
-    }finally{clearTimeout(timer);}
-  }
-  if(!data)throw new Error(lastErr||"Gemini API 호출 실패");
-  let raw=geminiResultText_(data);if(!raw)throw new Error(`Gemini 응답 본문이 비어 있습니다. (${model||primary})`);
-  return {raw:String(raw).replace(/```[a-z]*|```/gi,"").trim(),model,api_calls:apiCalls};
+      if(res.ok){const raw=geminiResultText_(parsed);if(raw)return {raw:String(raw).replace(/```[a-z]*|```/gi,"").trim(),model,api_calls:1};reason="Gemini 응답이 비어 있습니다."}
+      else reason=`Gemini HTTP ${res.status}: ${String(parsed&&parsed.error&&parsed.error.message||text).slice(0,140)}`;
+    }catch(e){reason=e&&e.name==="AbortError"?"Gemini 10초 이내 응답 없음":String(e&&e.message||e)}
+    finally{clearTimeout(timer)}
+  }else if(!env.GEMINI_API_KEY)reason="Gemini API 키 없음";
+  try{const result=await cloudflareScreenshotFallback_(env,parts,deadline);return {...result,api_calls:result.api_calls+1}}
+  catch(e){throw new Error("Gemini 실패 ("+reason+") / 대체 이미지 분석 실패: "+String(e&&e.message||e))}
 }
+
 function parseGeminiScreenshotPass_(raw,candidates,keyMap){
   const memberIds=new Set(),uncertain=[],notes=[],seenLines=new Set();let verify=false,parsedAny=false;
   const addUncertain=(t)=>{t=String(t||"").trim();if(t&&!seenLines.has(t)){seenLines.add(t);uncertain.push({text:t});}};
@@ -1229,7 +1224,7 @@ async function geminiScreenshotMatch_(env,images,candidates,context={}){
     catch(e){notes.push(`2차검증실패:${String(e&&e.message||e).slice(0,180)}`);}
   }else if(verificationNeeded)verificationSkipped=true;
   const uniq=[],seen=new Set();for(const u of uncertain){const t=String(u&&u.text||"");if(t&&!seen.has(t)){seen.add(t);uniq.push({text:t});}}
-  const calls=Number(pass1.api_calls||0)+Number(pass2&&pass2.api_calls||0),passes=pass2?2:1,model=`Gemini Free Vision · P1 ${pass1.model}${pass2?` + P2 ${pass2.model}`:""}`;
+  const calls=Number(pass1.api_calls||0)+Number(pass2&&pass2.api_calls||0),passes=pass2?2:1,model=`Vision · P1 ${pass1.model}${pass2?` + P2 ${pass2.model}`:""}`;
   return {model,member_ids:[...ids],uncertain:uniq,note:`api_calls=${Math.max(1,calls)} | external_passes=${passes} | images=${valid.length} | pass1_views=${pass1.view_count}${pass2?` | pass2_views=${pass2.view_count}`:""}${verificationNeeded?" | verify_requested=1":" | verify_requested=0"}${verificationSkipped?" | verify_skipped_budget=1":""}${notes.length?" | "+notes.join(" | ").slice(0,520):""}`};
 }
 async function analyzeScreenshotCore_(env,aid,eventId,images,meta={}){
