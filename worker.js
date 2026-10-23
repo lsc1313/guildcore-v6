@@ -1167,6 +1167,43 @@ async function cloudflareScreenshotFallback_(env,parts,deadline){
   const raw=String(result&&result.response||"").trim();if(!raw)throw new Error("Cloudflare AI 응답이 비어 있습니다.");
   return {raw:raw.replace(/```[a-z]*|```/gi,"").trim(),model:"cloudflare/llama-3.2-11b-vision",api_calls:1};
 }
+async function openRouterScreenshotVision_(env,parts,deadline){
+  if(!env.OPENROUTER_API_KEY)throw new Error("OPENROUTER_API_KEY Secret이 없습니다.");
+  const remaining=()=>Number(deadline||0)-Date.now();
+  if(remaining()<9000)throw new Error("OpenRouter 분석 시간 예산 부족");
+  const headers={"Authorization":"Bearer "+String(env.OPENROUTER_API_KEY),"Content-Type":"application/json","HTTP-Referer":"https://github.com/lsc1313/guildcore-v6","X-Title":"GuildCore"};
+  let models=[];
+  if(env.OPENROUTER_VISION_MODEL)models=[String(env.OPENROUTER_VISION_MODEL).trim()];
+  else{
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(5000,remaining()-4000));
+    try{
+      const res=await fetch("https://openrouter.ai/api/v1/models",{headers:{Authorization:headers.Authorization},signal:controller.signal});
+      if(!res.ok)throw new Error("모델 목록 HTTP "+res.status);
+      const j=await res.json();
+      models=(Array.isArray(j.data)?j.data:[]).filter(m=>{
+        const modalities=m.architecture&&m.architecture.input_modalities||[];
+        return String(m.id||"").endsWith(":free")&&modalities.includes("image")&&modalities.includes("text");
+      }).map(m=>m.id).slice(0,3);
+    }finally{clearTimeout(timer)}
+  }
+  if(!models.length)throw new Error("OpenRouter에서 사용 가능한 무료 이미지 분석 모델을 찾지 못했습니다.");
+  const content=[{type:"text",text:parts.filter(p=>p.text).map(p=>p.text).join("\n")}];
+  for(const part of parts.filter(p=>p.inlineData).slice(0,2))content.push({type:"image_url",image_url:{url:"data:"+part.inlineData.mimeType+";base64,"+part.inlineData.data}});
+  let last="";
+  for(const model of models){
+    if(remaining()<6000)break;
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(15000,remaining()-1500));
+    try{
+      const res=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers,body:JSON.stringify({model,messages:[{role:"user",content}],temperature:0,max_tokens:2200}),signal:controller.signal});
+      const j=await res.json();
+      if(!res.ok){last=model+" HTTP "+res.status+" "+String(j.error&&j.error.message||"").slice(0,120);continue;}
+      const raw=j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
+      if(typeof raw==="string"&&raw.trim())return {raw:raw.replace(/```[a-z]*|```/gi,"").trim(),model:"openrouter/"+model,api_calls:1};
+      last=model+" 응답 내용 없음";
+    }catch(e){last=model+" "+String(e&&e.message||e)}finally{clearTimeout(timer)}
+  }
+  throw new Error("OpenRouter 무료 비전 분석 실패: "+last);
+}
 async function geminiScreenshotApiCall_(env,parts,pass,deadline){
   const body={contents:[{role:"user",parts}],generationConfig:{mediaResolution:"MEDIA_RESOLUTION_HIGH",maxOutputTokens:3000,temperature:0}};
   const model=String(env.GEMINI_MODEL||"gemini-3.8-flash").trim()||"gemini-3.8-flash";
@@ -1220,7 +1257,10 @@ async function geminiAnalyzeScreenshotPass_(env,images,candidates,context,pass,d
   if(!env.GEMINI_API_KEY)throw new Error("GEMINI_API_KEY secret이 설정되지 않았습니다. Google AI Studio 무료 API 키를 ROOT Worker Secret에 추가하세요.");
   const bundle=await geminiScreenshotBundleViews_(env,images,pass),r=geminiScreenshotRoster_(candidates),prompt=geminiScreenshotPrompt_(r.roster,context,bundle.valid.length,pass,confirmedKeys),parts=[{text:prompt}];
   for(const v of bundle.views)parts.push({inlineData:{mimeType:String(v.mime_type||"image/jpeg"),data:String(v.data||"")}});
-  const api=await geminiScreenshotApiCall_(env,parts,pass,deadline),parsed=parseGeminiScreenshotPass_(api.raw,candidates,r.keyMap);
+  let api,openRouterError="";
+  if(env.OPENROUTER_API_KEY){try{api=await openRouterScreenshotVision_(env,parts,deadline)}catch(e){openRouterError=String(e&&e.message||e)}}
+  if(!api){try{api=await geminiScreenshotApiCall_(env,parts,pass,deadline)}catch(e){throw new Error((openRouterError?"OpenRouter: "+openRouterError+" / ":"")+String(e&&e.message||e))}}
+  const parsed=parseGeminiScreenshotPass_(api.raw,candidates,r.keyMap);
   return {...parsed,model:api.model,api_calls:api.api_calls,view_count:bundle.views.length,image_count:bundle.valid.length,keyed:r.keyed};
 }
 async function geminiScreenshotMatch_(env,images,candidates,context={}){
