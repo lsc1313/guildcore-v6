@@ -1244,9 +1244,11 @@ async function geminiAnalyzeScreenshotPass_(env,images,candidates,context,pass,d
   if(!env.GEMINI_API_KEY)throw new Error("GEMINI_API_KEY secret이 설정되지 않았습니다. Google AI Studio 무료 API 키를 ROOT Worker Secret에 추가하세요.");
   const bundle=await geminiScreenshotBundleViews_(env,images,pass),r=geminiScreenshotRoster_(candidates),prompt=geminiScreenshotPrompt_(r.roster,context,bundle.valid.length,pass,confirmedKeys),parts=[{text:prompt}];
   for(const v of bundle.views)parts.push({inlineData:{mimeType:String(v.mime_type||"image/jpeg"),data:String(v.data||"")}});
-  let api,openRouterError="";
-  if(env.OPENROUTER_API_KEY){try{api=await openRouterScreenshotVision_(env,parts,deadline)}catch(e){openRouterError=String(e&&e.message||e)}}
-  if(!api){try{api=await geminiScreenshotApiCall_(env,parts,pass,deadline)}catch(e){throw new Error((openRouterError?"OpenRouter: "+openRouterError+" / ":"")+String(e&&e.message||e))}}
+  // Dedicated GuildCore Gemini project is primary. OpenRouter is a last-resort fallback only.
+  let api,geminiError="";
+  try{api=await geminiScreenshotApiCall_(env,parts,pass,deadline)}catch(e){geminiError=String(e&&e.message||e)}
+  if(!api&&env.OPENROUTER_API_KEY&&deadline-Date.now()>5000){try{api=await openRouterScreenshotVision_(env,parts,deadline)}catch(e){throw new Error("Gemini: "+geminiError+" / OpenRouter: "+String(e&&e.message||e))}}
+  if(!api)throw new Error(geminiError||"이미지 분석 서비스 응답 없음");
   const parsed=parseGeminiScreenshotPass_(api.raw,candidates,r.keyMap);
   return {...parsed,model:api.model,api_calls:api.api_calls,view_count:bundle.views.length,image_count:bundle.valid.length,keyed:r.keyed};
 }
