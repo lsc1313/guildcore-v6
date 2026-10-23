@@ -1172,25 +1172,15 @@ async function openRouterScreenshotVision_(env,parts,deadline){
   const remaining=()=>Number(deadline||0)-Date.now();
   if(remaining()<9000)throw new Error("OpenRouter 분석 시간 예산 부족");
   const headers={"Authorization":"Bearer "+String(env.OPENROUTER_API_KEY),"Content-Type":"application/json","HTTP-Referer":"https://github.com/lsc1313/guildcore-v6","X-Title":"GuildCore"};
-  let models=[];
-  if(env.OPENROUTER_VISION_MODEL)models=[String(env.OPENROUTER_VISION_MODEL).trim()];
-  else{
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(5000,remaining()-4000));
-    try{
-      const res=await fetch("https://openrouter.ai/api/v1/models",{headers:{Authorization:headers.Authorization},signal:controller.signal});
-      if(!res.ok)throw new Error("모델 목록 HTTP "+res.status);
-      const j=await res.json();
-      models=(Array.isArray(j.data)?j.data:[]).filter(m=>{
-        const modalities=m.architecture&&m.architecture.input_modalities||[];
-        return String(m.id||"").endsWith(":free")&&modalities.includes("image")&&modalities.includes("text");
-      }).map(m=>m.id).slice(0,3);
-    }finally{clearTimeout(timer)}
-  }
-  if(!models.length)throw new Error("OpenRouter에서 사용 가능한 무료 이미지 분석 모델을 찾지 못했습니다.");
+  // The OpenRouter free router selects an image-capable free endpoint for multimodal input.
+  // Do not enumerate arbitrary :free models: some are restricted to agent harnesses (HTTP 403).
+  const models=env.OPENROUTER_VISION_MODEL?[String(env.OPENROUTER_VISION_MODEL).trim(),"openrouter/free"]:[
+    "openrouter/free","nvidia/nemotron-3.5-super-vl:free"
+  ];
   const content=[{type:"text",text:parts.filter(p=>p.text).map(p=>p.text).join("\n")}];
   for(const part of parts.filter(p=>p.inlineData).slice(0,2))content.push({type:"image_url",image_url:{url:"data:"+part.inlineData.mimeType+";base64,"+part.inlineData.data}});
   let last="";
-  for(const model of models){
+  for(const model of [...new Set(models)]){
     if(remaining()<6000)break;
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(15000,remaining()-1500));
     try{
