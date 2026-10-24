@@ -1773,6 +1773,9 @@ async function botRegisterDiscordMember_(env,aid,p){
 async function botRegisterKakaoMember_(env,aid,p){
   const key=String(p.kakao_user_key||"").trim(),sender=String(p.kakao_sender||p.sender||"").trim(),guildKey=String(p.guild_key||p.guild_id||"").trim(),nick=String(p.game_nickname||"").trim();if(!key||!guildKey||!nick)throw new Error("카카오 사용자, 길드, 게임 닉네임이 필요합니다.");
   const gs=await activeGuilds(env,aid),q=guildKey.toLowerCase();let g=gs.find(x=>String(x.guild_id).toLowerCase()===q)||gs.find(x=>String(x.guild_name).trim().toLowerCase()===q);if(!g){const p2=gs.filter(x=>String(x.guild_name).toLowerCase().includes(q));if(p2.length===1)g=p2[0];}if(!g)throw new Error("길드를 찾을 수 없습니다: "+guildKey);
+  const existingKey=await first(env.DB,"SELECT kakao_sender FROM kakao_members WHERE alliance_id=? AND kakao_user_key=? AND status='active'",aid,key);
+  if(existingKey&&String(existingKey.kakao_sender||"").trim()&&sender&&String(existingKey.kakao_sender).trim()!==sender)
+    throw new Error("등록 보류: 다른 카카오 발신자가 동일한 식별키를 사용하고 있습니다. 관리자 확인이 필요합니다.");
   const old=await first(env.DB,"SELECT * FROM kakao_members WHERE alliance_id=? AND kakao_user_key=?",aid,key),oldG=old?.current_guild_id||"",oldNick=old?.game_nickname||"";if(old&&oldG&&oldG!==g.guild_id&&old.current_member_id)await run(env.DB,"UPDATE members SET status='이동' WHERE member_id=?",old.current_member_id);
   const mid=await botEnsureMember_(env,g.guild_id,nick,old&&oldG===g.guild_id?old.current_member_id:"","kakao"),now=nowIso();
   await run(env.DB,"INSERT INTO kakao_members(alliance_id,kakao_user_key,kakao_user_hash,kakao_sender,kakao_room_id,kakao_room_name,current_guild_id,current_member_id,game_nickname,status,registered_at,last_reregistered_at,updated_at,source,note) VALUES(?,?,?,?,?,?,?,?,?,'active',?,?,?,'kakao','') ON CONFLICT(alliance_id,kakao_user_key) DO UPDATE SET kakao_user_hash=excluded.kakao_user_hash,kakao_sender=excluded.kakao_sender,kakao_room_id=excluded.kakao_room_id,kakao_room_name=excluded.kakao_room_name,current_guild_id=excluded.current_guild_id,current_member_id=excluded.current_member_id,game_nickname=excluded.game_nickname,status='active',last_reregistered_at=excluded.updated_at,updated_at=excluded.updated_at",aid,key,String(p.user_hash||""),sender,String(p.room_id||""),String(p.room_name||""),g.guild_id,mid,nick,old?.registered_at||now,old?now:"",now);
@@ -1896,6 +1899,15 @@ async function botBoundDiscordServers_(env){
 async function botEventVisible_(actor,e){return String(e.boss_scope||"WORLD")!=="SERVER"||String(e.server_id||"")===String(actor.server_id||"")||actor.alliance_level>=70;}
 async function botOpenEvent_(env,aid,bossValue,p){const actor=await botActor_(env,aid,p),events=await all(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND attendance_status='open' ORDER BY attendance_opened_at DESC,created_at DESC",aid),visible=[];for(const e of events)if(await botEventVisible_(actor,e))visible.push(e);if(bossValue){const q=String(bossValue||"").trim().toLowerCase(),direct=visible.find(x=>String(x.event_id||"").toLowerCase()===q||String(x.boss_name||"").trim().toLowerCase()===q);if(direct)return direct;const b=await botBoss_(env,aid,bossValue,p),e=visible.find(x=>String(x.boss_id)===String(b.boss_id));if(!e)throw new Error(`${b.boss_name}은(는) 현재 열린 출석이 없습니다.`);return e;}if(!visible.length)throw new Error("현재 진행 중인 보스 출석이 없습니다.");if(visible.length>1)throw new Error("열린 출석이 여러 개입니다. 보스명/참여체크 제목을 함께 입력하세요.");return visible[0];}
 async function botAttendanceSet_(env,aid,p){
+  // Fail closed if the Kakao message sender disagrees with the identity that registered this key.
+  // A shared/room-derived key must never silently mark another member present.
+  if(p&&p.kakao_user_key){
+    const sender=String(p.kakao_sender||p.sender||"").trim();
+    const identity=await first(env.DB,"SELECT kakao_sender FROM kakao_members WHERE alliance_id=? AND kakao_user_key=? AND status='active'",aid,String(p.kakao_user_key));
+    const registeredSender=String(identity&&identity.kakao_sender||"").trim();
+    if(!sender||!registeredSender||sender!==registeredSender)
+      throw new Error("출석 보류: 카카오 발신자와 등록된 사용자 정보가 일치하지 않습니다. 관리자에게 등록 연결을 확인받으세요.");
+  }
   const actor=await botActor_(env,aid,p),e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,String(p.event_id||""));if(!e)throw new Error("참여 이벤트를 찾을 수 없습니다.");if(e.attendance_status!=="open")throw new Error("이미 종료된 출석입니다.");if(!await botEventVisible_(actor,e))throw new Error("현재 참여할 수 없는 이벤트입니다.");
   const requested=boolVal(p.attended,true),now=nowIso(),g=actor.guild,srv=await serverMeta(env,aid,g.server_id),old=await first(env.DB,"SELECT * FROM boss_attendance WHERE event_id=? AND member_id_at_event=? ORDER BY recorded_at DESC LIMIT 1",e.event_id,actor.member_id),src=botSource_(p),discordUserId=p.kakao_user_key?String(old?.discord_user_id||""):String(p.discord_user_id||old?.discord_user_id||"");
   if(old&&old.source)await recordAttendanceEvidence_(env,aid,e.event_id,actor.member_id,old.source,"legacy before bot update");
