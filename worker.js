@@ -1447,7 +1447,7 @@ async function generateDueBossAlerts_(env,now=new Date()){
     for(const spawn of spawns){
       if(!spawn||Number.isNaN(spawn.getTime()))continue;
       // Fixed/weekly attendance is opened by !컷; scheduled spawns only generate reminders.
-      for(const a of [{type:"10m",mins:10,on:boolVal(b.alert_10m,true)},{type:"5m",mins:5,on:boolVal(b.alert_5m,true)},{type:"1m",mins:1,on:boolVal(b.alert_1m,true)},{type:"spawn",mins:0,on:boolVal(b.alert_spawn,true)}]){
+      for(const a of [{type:"10m",mins:10,on:boolVal(b.alert_10m,true)},{type:"5m",mins:5,on:boolVal(b.alert_5m,true)}]){
         if(!a.on)continue;
         const due=new Date(spawn.getTime()-a.mins*60000),lag=now.getTime()-due.getTime();
         /* 미래 알림은 만들지 않고, 90초 이상 늦은 알림도 만들지 않는다. */
@@ -2047,7 +2047,7 @@ async function gcKakaoRecordLease_(env,aid,type,id){
 
 async function botPullAlerts_(env,aid,p){
   /* 소비자가 폴링하는 순간에도 현재 시각 기준 알림을 생성한다.
-     ROOT cron -> 소비자 cron 두 단계 지연을 줄여 10/5/1분 알림을 제시간에 가깝게 보낸다. */
+     ROOT cron -> 소비자 cron 두 단계 지연을 줄여 10/5분 알림을 제시간에 가깝게 보낸다. */
   const current=new Date();
   await generateDueBossAlerts_(env,current);
   const target=String(p.target||"discord").toLowerCase()==="kakao"?"kakao":"discord",key=target+"_status",limit=Math.max(1,Math.min(100,Number(p.limit||20))),now=current.getTime();
@@ -2060,9 +2060,9 @@ async function botPullAlerts_(env,aid,p){
   const seen=new Set();
   for(const x of rows){
     const due=new Date(x.due_at),spawn=new Date(x.spawn_at),type=String(x.alert_type||"");
-    /* Kakao boss alerts: only 10m + 5m. Discord keeps the full alert set. */
-    if(target==="kakao"&&type!=="10m"&&type!=="5m"){
-      await run(env.DB,`UPDATE boss_alert_queue SET kakao_status='expired' WHERE alert_id=?`,x.alert_id);
+    /* All platforms: only 10m and 5m; expire legacy 1m/spawn queue items. */
+    if(type!=="10m"&&type!=="5m"){
+      await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);
       continue;
     }
     if(Number.isNaN(due.getTime())){await run(env.DB,`UPDATE boss_alert_queue SET ${key}='expired' WHERE alert_id=?`,x.alert_id);continue;}
@@ -2208,10 +2208,10 @@ async function botKakaoCommand_(env,aid,p){
   if(cmd==="등록"){if(args.length<2)throw new Error("사용법: !등록 길드명 게임닉네임");const guild=args.shift(),nick=args.join(" "),r=await botRegisterKakaoMember_(env,aid,{...p,guild_key:guild,game_nickname:nick});return {reply:`✅ 등록 완료\n길드: ${r.guild_name}\n닉네임: ${r.game_nickname}`};}
   if(cmd==="웹핀"){const r=await botWebPinSelf_(env,aid,{...p,kakao_user_key:key});return {reply:`🔐 웹 로그인 PIN: ${r.pin}\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
   if(cmd==="보스"||cmd==="보스확인"||cmd==="보탐"){const list=await botBosses_(env,aid,{kakao_user_key:key});if(!list.length)return {reply:"등록된 활성 보스가 없습니다."};const groups={};for(const b of list){const k=b.boss_scope==="WORLD"?"월드":b.server_name;(groups[k]||(groups[k]=[])).push(b);}const out=[];const keys=Object.keys(groups).sort((a,b)=>a==="월드"?1:(b==="월드"?-1:a.localeCompare(b,"ko",{numeric:true})));for(const k of keys){out.push(`[${k}]`);const rows=groups[k].sort((a,b)=>{const av=String(a.next_spawn_at||"9999-12-31 23:59"),bv=String(b.next_spawn_at||"9999-12-31 23:59");const c=av.localeCompare(bv);return c||String(a.boss_name||"").localeCompare(String(b.boss_name||""),"ko");});for(const b of rows)out.push(`${b.boss_name} · 컷 ${b.last_kill_at?b.last_kill_at.slice(-5):"-"} · 예정 ${botBossNextLabel_(b)}`);}return {reply:out.join("\n")};}
-  if(cmd==="컷"){if(!args.length)throw new Error("사용법: !컷 보스명 [HH:MM|HHMM]");let cutAt="",lastCut=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastCut)||/^\d{2}:\d{2}$/.test(lastCut))){if(!isClockInput_(lastCut))throw new Error("컷 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");cutAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossCut_(env,aid,{kakao_user_key:key,boss,cut_at:cutAt});let s=`${r.boss_name}\n컷 ${r.cut_at.slice(-5)}\n예정 ${r.next_spawn_at.slice(-5)}`;if(r.event_id)s+=`\n\n🔗 출석체크: ${webAttendanceUrl_(env.PUBLIC_WEB_URL||"https://6.lsc1313.workers.dev",r.event_id)}`;return {reply:s,event_id:r.event_id||"",sync_attendance:!!r.event_id};}
+  if(cmd==="컷"){if(!args.length)throw new Error("사용법: !컷 보스명 [HH:MM|HHMM]");let cutAt="",lastCut=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastCut)||/^\d{2}:\d{2}$/.test(lastCut))){if(!isClockInput_(lastCut))throw new Error("컷 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");cutAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossCut_(env,aid,{kakao_user_key:key,boss,cut_at:cutAt});let s=`${r.boss_name}\n컷 ${r.cut_at.slice(-5)}\n예정 ${r.next_spawn_at.slice(-5)}`;if(r.event_id)s+=`\n\n🔗 출석체크: ${webAttendanceUrl_(env.PUBLIC_WEB_URL||"https://guildcore-v6.lsc1313.workers.dev",r.event_id)}`;return {reply:s,event_id:r.event_id||"",sync_attendance:!!r.event_id};}
   if(cmd==="젠"){if(!args.length)throw new Error("사용법: !젠 보스명 [HH:MM|HHMM]");let spawnAt="",lastSpawn=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastSpawn)||/^\d{2}:\d{2}$/.test(lastSpawn))){if(!isClockInput_(lastSpawn))throw new Error("젠 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");spawnAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossSpawn_(env,aid,{kakao_user_key:key,boss,spawn_at:spawnAt});return {reply:`${r.boss_name}\n예정 ${r.next_spawn_at?r.next_spawn_at.slice(-5):"-"}`};}
-  if(cmd==="참여체크생성"){const title=args.join(" ").trim();if(!title)throw new Error("사용법: !참여체크생성 제목");const r=await botParticipationCreate_(env,aid,{kakao_user_key:key,title});return {reply:`✅ 참여체크 생성\n${r.title}\n출석 링크: ${webAttendanceUrl_(env.PUBLIC_WEB_URL||"https://6.lsc1313.workers.dev",r.event_id)}\n종료: !출석종료 ${r.title}`,event_id:r.event_id||"",sync_attendance:true};}
-  if(cmd==="참여"||cmd==="취소")return {reply:"출석은 보스 컷 메시지의 웹 출석 링크에서 진행해주세요."};
+  if(cmd==="참여체크생성"){const title=args.join(" ").trim();if(!title)throw new Error("사용법: !참여체크생성 제목");const r=await botParticipationCreate_(env,aid,{kakao_user_key:key,title});return {reply:`✅ 참여체크 생성\n${r.title}\n출석 링크: ${webAttendanceUrl_(env.PUBLIC_WEB_URL||"https://guildcore-v6.lsc1313.workers.dev",r.event_id)}\n종료: !출석종료 ${r.title}`,event_id:r.event_id||"",sync_attendance:true};}
+  // !참여 / !취소 commands retired: web attendance only.
   if(cmd==="출석종료"){if(!args.length)throw new Error("사용법: !출석종료 보스명|참여체크 제목");const r=await botAttendanceClose_(env,aid,{kakao_user_key:key,boss:args.join(" ")});return {reply:r.summary||r.message,attendance_result_id:r.result_id||"",event_id:r.event_id||"",sync_attendance:true};}
   if(cmd==="참여삭제"){if(args.length<2)throw new Error("사용법: !참여삭제 보스명 닉네임");const r=await botAttendanceRemove_(env,aid,{kakao_user_key:key,boss:args[0],nickname:args.slice(1).join(" ")});return {reply:`✅ ${r.message}\n현재 참여 ${(r.attendance.participants||[]).map(x=>x.nickname).join(" · ")}`,event_id:r.event_id||"",sync_attendance:true};}
   if(cmd==="보탐대조"){const r=await botScreenshotLatest_(env,aid,{kakao_user_key:key,boss:args.join(" ")});if(r.empty)return {reply:`📸 ${r.boss_name} · 저장된 스크린샷 대조 결과가 없습니다.`};const names=function(rows){return (rows||[]).map(x=>{const n=x.nickname||x.text||"";const ls=Array.isArray(x.source_labels)?x.source_labels:[];return n+(ls.length?` [${ls.join("+")}]`:"")}).filter(Boolean).join(" · ")||"-"};const grouped=function(rows){const g={};for(const x of rows||[]){const k=(x.server_name?x.server_name+" / ":"")+(x.guild_name||"기타");(g[k]||(g[k]=[])).push(x)}return Object.keys(g).sort((a,b)=>a.localeCompare(b,"ko")).map(k=>`[${k}] ${names(g[k])}`).join("\n")||"-"};return {reply:`📸 ${r.boss_name} 보탐 대조
@@ -2399,8 +2399,10 @@ function webAttendanceUrl_(origin, eventId){return origin.replace(/\/$/,"")+"/at
 function webAttendancePage_(){
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GuildCore 출석</title><style>body{margin:0;background:#080e1b;color:#f3f6ff;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.panel{width:min(90vw,420px);background:#131f35;border:1px solid #34435e;border-radius:20px;padding:24px;box-sizing:border-box}button{width:100%;padding:16px;border:0;border-radius:12px;background:#3285fa;color:white;font-size:17px;font-weight:700}p{line-height:1.6;color:#b9c8dd}a{color:#91c4ff}</style></head><body><div class="panel"><h2>GuildCore 출석</h2><p id="status">로그인 상태를 확인하는 중...</p><button id="action" hidden>참여하기</button><p><a href="/" id="login">웹핀 로그인 / 메인으로</a></p></div><script>
 const id=new URLSearchParams(location.search).get("event");
-const token=localStorage.getItem("guildcore_web_token")||"";
+const token=localStorage.getItem("guildcore_web_token")||sessionStorage.getItem("guildcore_web_token")||"";
 const status=document.getElementById("status"),btn=document.getElementById("action");
+// Keep the exact attendance link when the user opens the main web-PIN login page.
+document.getElementById("login").addEventListener("click",()=>{try{sessionStorage.setItem("guildcore_attendance_return",location.href)}catch(e){}});
 async function rpc(method,args){const r=await fetch("/rpc",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method,args})});const j=await r.json();if(!j.ok)throw Error(j.error||"요청 실패");return j.data;}
 async function refresh(){try{if(!id)throw Error("출석 링크가 올바르지 않습니다.");const data=await rpc("webAttendanceInfo",[token,id]);status.textContent=data.boss_name+" · "+data.nickname+" · "+(data.open?"출석 진행 중":"출석 마감");btn.hidden=!data.open;btn.textContent=data.attended?"참여 취소":"참여하기";btn.onclick=async()=>{btn.disabled=true;try{await rpc("webAttendanceToggle",[token,id,!data.attended]);await refresh()}catch(e){status.textContent=e.message}finally{btn.disabled=false}};}catch(e){status.textContent=e.message+" 웹핀 로그인이 필요하면 메인에서 로그인한 뒤 이 링크를 다시 열어주세요.";btn.hidden=true;}}
 refresh();
