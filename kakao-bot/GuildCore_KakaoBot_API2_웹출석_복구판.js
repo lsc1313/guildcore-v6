@@ -848,6 +848,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
+    "!발송방등록 실제카톡방이름 · !알림점검",
     "!알림점검 · !발송진단 · !방진단 · !연결목록 · !타이머재시작",
     "",
     "[기본/보스]",
@@ -1068,6 +1069,54 @@ function response(
       return;
     }
 
+    /* Open-chat API2 may report msg.room as a sender nickname.
+       Never persist it automatically. The operator must name the destination
+       explicitly and only a successful send verifies the session. */
+    if (text.indexOf("!발송방등록 ") === 0) {
+      var registered = getRoomBinding_(room, channelId);
+      if (!registered || registered.active !== true) {
+        replier.reply("❌ 먼저 !핑 연합명 [길드명] 으로 연결해주세요.");
+        return;
+      }
+      if (!isGroupChat) {
+        replier.reply("❌ 1:1 대화방은 자동알림 대상으로 등록하지 않습니다.");
+        return;
+      }
+      var alias = text.substring("!발송방등록 ".length).trim();
+      if (!alias || alias.length > 100) {
+        replier.reply("사용법: !발송방등록 카톡방의정확한이름");
+        return;
+      }
+      var binds = loadRoomBindings_();
+      for (var bk in binds) {
+        if (!Object.prototype.hasOwnProperty.call(binds, bk) ||
+            bk === roomKey_(room, channelId)) continue;
+        if (binds[bk] && binds[bk].active === true &&
+            String(binds[bk].room_name || "") === alias) {
+          replier.reply("❌ 이미 다른 연결 방에 등록된 발송 이름입니다. 채팅방 이름을 고유하게 변경해주세요.");
+          return;
+        }
+      }
+      try {
+        var check = GC_API2_BOT_.send(alias, "🔔 GuildCore 자동발송 연결 시험 · 현재 채팅방 수신 여부를 확인해주세요.", "com.kakao.talk");
+        if (check !== true) {
+          replier.reply("❌ 자동발송 세션을 확인하지 못했습니다: " + String(check) +
+            "\n카카오톡 알림 접근 권한과 실제 채팅방 이름을 확인해주세요.");
+          return;
+        }
+        var keyAlias = roomKey_(room, channelId);
+        binds[keyAlias].room_name = alias;
+        binds[keyAlias].send_alias_verified_at = new Date().toISOString();
+        if (!saveRoomBindings_(binds)) throw new Error("발송 이름 영구 저장 실패");
+        replier.reply("✅ 자동발송 이름 저장: " + alias +
+          "\n방 유형: " + (registered.room_type === "guild" ? "길드방" : "연합방") +
+          "\n시험 메시지가 이 채팅방에 도착했는지 확인해주세요.");
+      } catch (aliasError) {
+        replier.reply("❌ 발송방 등록 실패: " + String(aliasError));
+      }
+      return;
+    }
+
     if (text === "!알림점검") {
       var b = getRoomBinding_(room, channelId);
       replier.reply(
@@ -1078,6 +1127,8 @@ function response(
         "타이머 소유권: " + (String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) === KAKAO_TIMER_OWNER_ ? "일치" : "불일치") + "\n" +
         "현재 명령 처리 중: " + String(KAKAO_COMMAND_BUSY_) + "\n" +
         "현재 방 연합: " + (b && b.alliance_id || "없음") + "\n" +
+        "방 유형: " + (b && b.room_type || "미등록") + "\n" +
+        "자동발송 이름: " + (b && b.room_name || "미등록 · !발송방등록 실제방이름 필요") + "\n" +
         "전체 활성 연결 수: " + activeRoomEntries_().length + "\n" +
         "연결기록 자동정리: " + GC_CLEANUP_REPORT_ + "\n" +
         roomBindingAuditText_() + "\n" +
