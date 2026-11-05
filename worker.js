@@ -2346,10 +2346,27 @@ async function handleDirectKakao_(request,env){
   }catch(e){return json({ok:false,error:errorMessage(e)},400)}
 }
 
+
+// Web attendance link entry: an event identifier is never an authentication credential.
+function webAttendanceUrl_(origin, eventId){return origin.replace(/\/$/,"")+"/attendance?event="+encodeURIComponent(String(eventId||""));}
+function webAttendancePage_(){
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GuildCore 출석</title><style>body{margin:0;background:#080e1b;color:#f3f6ff;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.panel{width:min(90vw,420px);background:#131f35;border:1px solid #34435e;border-radius:20px;padding:24px;box-sizing:border-box}button{width:100%;padding:16px;border:0;border-radius:12px;background:#3285fa;color:white;font-size:17px;font-weight:700}p{line-height:1.6;color:#b9c8dd}a{color:#91c4ff}</style></head><body><div class="panel"><h2>GuildCore 출석</h2><p id="status">로그인 상태를 확인하는 중...</p><button id="action" hidden>참여하기</button><p><a href="/" id="login">웹핀 로그인 / 메인으로</a></p></div><script>
+const id=new URLSearchParams(location.search).get("event");
+const token=localStorage.getItem("guildcore_web_token")||"";
+const status=document.getElementById("status"),btn=document.getElementById("action");
+async function rpc(method,args){const r=await fetch("/rpc",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method,args})});const j=await r.json();if(!j.ok)throw Error(j.error||"요청 실패");return j.data;}
+async function refresh(){try{if(!id)throw Error("출석 링크가 올바르지 않습니다.");const data=await rpc("webAttendanceInfo",[token,id]);status.textContent=data.boss_name+" · "+data.nickname+" · "+(data.open?"출석 진행 중":"출석 마감");btn.hidden=!data.open;btn.textContent=data.attended?"참여 취소":"참여하기";btn.onclick=async()=>{btn.disabled=true;try{await rpc("webAttendanceToggle",[token,id,!data.attended]);await refresh()}catch(e){status.textContent=e.message}finally{btn.disabled=false}};}catch(e){status.textContent=e.message+" 웹핀 로그인이 필요하면 메인에서 로그인한 뒤 이 링크를 다시 열어주세요.";btn.hidden=true;}}
+refresh();
+</script></body></html>`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/attendance") {
+        return new Response(webAttendancePage_(),{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}});
+      }
       if (request.method === "GET" && url.pathname === "/health") {
         return json({ok:true,version:APP_VERSION,engine:"Cloudflare Worker + D1"});
       }
