@@ -573,6 +573,12 @@ function proactiveReply_(binding, message) {
   }
   binding = current;
   var roomName = String(binding && binding.room_name || "").trim();
+  // Diagnose-only aliases can be sender names, not actual group titles.
+  if (binding.send_alias_source !== "manual_confirmed") {
+    KAKAO_SEND_LAST_DETAIL_ = "자동발송 대상 미확인: !발송방등록 정확한방이름 후 !발송확인";
+    KAKAO_ALERT_LAST_ERROR_ = KAKAO_SEND_LAST_DETAIL_;
+    return false;
+  }
   if (!roomName) {
     KAKAO_SEND_LAST_DETAIL_ = "채팅방 이름 없음";
     KAKAO_ALERT_LAST_ERROR_ = KAKAO_SEND_LAST_DETAIL_;
@@ -848,7 +854,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
-    "!발송방등록 실제카톡방이름 · !알림점검",
+    "!발송방등록 정확한방이름 → !발송확인 · !알림점검",
     "!알림점검 · !발송진단 · !방진단 · !연결목록 · !타이머재시작",
     "",
     "[기본/보스]",
@@ -1028,11 +1034,8 @@ function response(
       canReplyCheck_("ID 세션", targetId, null);
       canReplyCheck_("ID+카카오 세션", targetId, pkg);
       var trialText = "🔔 GuildCore v2.0.7 채팅방 자동발송 시험";
-      var routes = [
-        {label:"방 이름+카카오", key:targetRoom, pkg:pkg},
-        {label:"방 이름", key:targetRoom, pkg:null},
-        {label:"문자열 ID+카카오", key:targetId, pkg:pkg}
-      ];
+      // Read-only diagnosis. Never send or store the untrusted msg.room alias.
+      var routes = [];
       var delivered = false;
       for (var ri = 0; ri < routes.length; ri++) {
         var route = routes[ri];
@@ -1042,29 +1045,13 @@ function response(
             ? GC_API2_BOT_.send(route.key, trialText)
             : GC_API2_BOT_.send(route.key, trialText, route.pkg);
           report.push(route.label + " 발송: " + String(outcome));
-          if (outcome === true) {            delivered = true;
-            // 해당 channelId의 연결에 실제 성공한 발송 별칭을 저장한다.
-            // msg.room은 오픈채팅에서 발신자 닉네임일 수 있으므로
-            // !핑이나 다른 메시지에서는 별칭을 덮어쓰지 않는다.
-            if (route.label === "방 이름+카카오" || route.label === "방 이름") {
-              var allBindings = loadRoomBindings_();
-              var bindKey = "channel:" + targetId;
-              if (allBindings[bindKey] && allBindings[bindKey].active === true) {
-                allBindings[bindKey].room_name = targetRoom;
-                allBindings[bindKey].send_alias_verified_at = new Date().toISOString();
-                saveRoomBindings_(allBindings);
-                report.push("자동알림 발송 별칭 등록: " + targetRoom);
-              }
-            }
-            report.push("성공 반환으로 추가 발송 중단");
-            break;
-          }
+          if (outcome === true) { delivered = true; break; }
         } catch (sendErr) {
           report.push(route.label + " 예외: " + String(sendErr));
         }
       }
-      report.push("결론: " + (delivered ? "전송 세션 확인(실제 수신 확인 필요)" : "모든 발송 경로 실패"));
-      report.push("※ 별칭 등록은 서버 알림 대기열을 변경하지 않습니다.");
+      report.push("진단은 안전을 위해 발송·별칭등록을 하지 않습니다.");
+      report.push("!발송방등록 정확한방이름 → !발송확인 순서로 등록하세요.");
       replier.reply(report.join("\n"));
       return;
     }
@@ -1087,6 +1074,10 @@ function response(
         replier.reply("사용법: !발송방등록 카톡방의정확한이름");
         return;
       }
+      if (alias === String(sender || "").trim() || alias === String(room || "").trim()) {
+        replier.reply("❌ 발신자 이름을 발송방으로 등록할 수 없습니다. 상단의 정확한 단체방 이름을 입력하세요.");
+        return;
+      }
       var binds = loadRoomBindings_();
       for (var bk in binds) {
         if (!Object.prototype.hasOwnProperty.call(binds, bk) ||
@@ -1105,18 +1096,39 @@ function response(
           return;
         }
         var keyAlias = roomKey_(room, channelId);
-        binds[keyAlias].room_name = alias;
-        binds[keyAlias].send_alias_verified_at = new Date().toISOString();
-        if (!saveRoomBindings_(binds)) throw new Error("발송 이름 영구 저장 실패");
-        replier.reply("✅ 자동발송 이름 저장: " + alias +
-          "\n방 유형: " + (registered.room_type === "guild" ? "길드방" : "연합방") +
-          "\n시험 메시지가 이 채팅방에 도착했는지 확인해주세요.");
+        binds[keyAlias].room_name = "";
+        binds[keyAlias].send_alias_source = "";
+        binds[keyAlias].pending_send_alias = alias;
+        binds[keyAlias].pending_send_alias_at = new Date().toISOString();
+        if (!saveRoomBindings_(binds)) throw new Error("시험 발송 이름 저장 실패");
+        replier.reply("🔎 시험 메시지가 이 단체방에 도착했으면 5분 안에 !발송확인 을 입력하세요.\n확인 전에는 자동알림이 발송되지 않습니다.");
       } catch (aliasError) {
         replier.reply("❌ 발송방 등록 실패: " + String(aliasError));
       }
       return;
     }
 
+    if (text === "!발송확인") {
+      var pendingBinding = getRoomBinding_(room, channelId);
+      if (!pendingBinding || pendingBinding.active !== true || !isGroupChat) {
+        replier.reply("❌ 연결된 단체방에서만 확인할 수 있습니다."); return;
+      }
+      var pending = String(pendingBinding.pending_send_alias || "");
+      var pendingAt = Date.parse(String(pendingBinding.pending_send_alias_at || ""));
+      if (!pending || !isFinite(pendingAt) || Date.now()-pendingAt > 300000) {
+        replier.reply("❌ 유효한 시험 발송 기록이 없습니다. !발송방등록 정확한방이름 을 다시 입력하세요."); return;
+      }
+      var confirmed = loadRoomBindings_();
+      var ck = roomKey_(room,channelId);
+      confirmed[ck].room_name = pending;
+      confirmed[ck].send_alias_source = "manual_confirmed";
+      confirmed[ck].send_alias_verified_at = new Date().toISOString();
+      delete confirmed[ck].pending_send_alias;
+      delete confirmed[ck].pending_send_alias_at;
+      if (!saveRoomBindings_(confirmed)) throw new Error("발송방 확정 저장 실패");
+      replier.reply("✅ 자동발송 대상 확정: "+pending);
+      return;
+    }
     if (text === "!알림점검") {
       var b = getRoomBinding_(room, channelId);
       replier.reply(
@@ -1128,7 +1140,7 @@ function response(
         "현재 명령 처리 중: " + String(KAKAO_COMMAND_BUSY_) + "\n" +
         "현재 방 연합: " + (b && b.alliance_id || "없음") + "\n" +
         "방 유형: " + (b && b.room_type || "미등록") + "\n" +
-        "자동발송 이름: " + (b && b.room_name || "미등록 · !발송방등록 실제방이름 필요") + "\n" +
+        "자동발송 이름: " + (b && b.send_alias_source === "manual_confirmed" && b.room_name || "미확인 · !발송방등록 정확한방이름 필요") + "\n" +
         "전체 활성 연결 수: " + activeRoomEntries_().length + "\n" +
         "연결기록 자동정리: " + GC_CLEANUP_REPORT_ + "\n" +
         roomBindingAuditText_() + "\n" +
