@@ -1,28 +1,10 @@
 /**
- * GuildCore Kakao Bot API2 - 복구판 / 웹 출석 연동
- * MessengerBotR API2
- *
- * 구조:
- * 카카오톡 → MessengerBotR → GuildCore V6 /kakao → D1
- *
- * 데이터 원본은 V6 D1 하나만 사용합니다.
- * Discord / Kakao / Web UI가 같은 데이터를 보도록 하는 연결 기반 버전입니다.
- *
- * 연결 규칙:
- * - !핑 [연합명] : 연합 공지방 연결
- * - !핑 [연합명] [길드명] : 해당 연합의 길드방 연결
- * - !핑          : 이미 연결 이력이 있으면 같은 연합으로 다시 활성화
- *                  연결 이력이 없고 활성 연합이 1개면 자동 연결
- *                  활성 연합이 여러 개면 연합명 입력 안내
- * - !핑해제      : 현재 방을 비활성화하되 마지막 연합 매핑은 기억
- * - 연결되지 않은 방의 다른 !명령은 이유와 !핑 안내를 응답
- * - 연결된 방만 10분/5분 자동알림 수신
- *
- * 중요:
- * - 코드에 alliance_001 같은 연합 ID를 고정하지 않습니다.
- * - v1.4의 오래된 방 활성화 기록은 사용하지 않습니다.
- * - 휴대폰에는 GUILDCORE_BRIDGE_KEY를 넣지 않습니다.
- * - 휴대폰에는 별도 KAKAO_INPUT_KEY만 넣습니다.
+ * GuildCore MessengerBotR API2 production bot
+ * Kakao -> Cloudflare Worker -> D1
+ * !핑 연합명: alliance room; !핑 연합명 길드명: guild room
+ * Boss reminders: 10m and 5m only; web attendance link on !컷
+ * Sends final attendance roster once per verified group room.
+ * A group send session requires explicit !발송방등록 and !발송확인.
  */
 
 var GUILDCORE_KAKAO_URL =
@@ -503,52 +485,6 @@ function activeRoomEntries_() {
   return out;
 }
 
-/* v1.15.4 read-only audit: a stored alias is not necessarily a distinct chat room. */
-function roomBindingAudit_() {
-  var bindings = loadRoomBindings_(), own = Object.prototype.hasOwnProperty;
-  var keys = 0, active = 0, inactive = 0, names = {}, channels = {}, unnamed = 0, perAlliance = {}, roomConflicts = {};
-  var counted = {};
-  for (var k in bindings) {
-    if (!own.call(bindings,k)) continue;
-    keys++;
-    var b=bindings[k];
-    if (!b || b.active !== true || !String(b.alliance_id||"").trim()) { inactive++; continue; }
-    active++;
-    var rn=String(b.room_name||"").trim();
-    var ch=String(b.channel_id||"").trim();
-    var aid=String(b.alliance_id||"").trim();
-    perAlliance[aid]=(perAlliance[aid]||0)+1;
-    if (rn) {
-      names[rn]=true;
-      if (!roomConflicts[rn]) roomConflicts[rn]={};
-      roomConflicts[rn][aid]=true;
-    } else unnamed++;
-    if (ch) channels[ch]=true;
-  }
-  function size_(obj) { var n=0;for(var key in obj)if(own.call(obj,key))n++;return n; }
-  var conflicts=0;
-  for(var n in roomConflicts)if(own.call(roomConflicts,n)&&size_(roomConflicts[n])>1)conflicts++;
-  var allianceParts=[];
-  for(var a in perAlliance)if(own.call(perAlliance,a))allianceParts.push(a+": "+perAlliance[a]);
-  allianceParts.sort();
-  return {
-    records:keys, activeRecords:active, inactiveRecords:inactive,
-    distinctNames:size_(names), distinctChannels:size_(channels),
-    nameless:unnamed, conflictingNames:conflicts, alliances:allianceParts.join(" / ") || "없음"
-  };
-}
-function roomBindingAuditText_() {
-  var a=roomBindingAudit_();
-  return "저장된 전체 기록: "+a.records+"\n"+
-    "활성 기록: "+a.activeRecords+" / 비활성: "+a.inactiveRecords+"\n"+
-    "서로 다른 방 이름(추정): "+a.distinctNames+"\n"+
-    "서로 다른 channelId(추정): "+a.distinctChannels+"\n"+
-    "방 이름 없는 활성 기록: "+a.nameless+"\n"+
-    "같은 방 이름의 연합 ID 충돌: "+a.conflictingNames+"\n"+
-    "연합별 활성 기록: "+a.alliances+"\n"+
-    "※ 이름/ID 통계는 실제 카톡방 수의 확정값이 아닙니다. 기록은 삭제하지 않았습니다.";
-}
-
 function postAlertControl_(mode, allianceId, extra) {
   var body = {
     key: KAKAO_INPUT_KEY,
@@ -854,9 +790,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
-    "!오픈방시험 → !발송확인 · !알림점검",
-    "!발송방등록 정확한방이름 → !발송확인 · !알림점검",
-    "!알림점검 · !발송진단 · !방진단 · !연결목록 · !타이머재시작",
+    "!발송방등록 방이름 → !발송확인"
     "",
     "[기본/보스]",
     "!등록 길드명 게임닉네임",
@@ -915,18 +849,6 @@ function response(
     gcTouchRoom_(room, channelId);
     if (text.indexOf("!") !== 0) return;
     if (/^!(참여|취소)(?:\s|$)/.test(text)) { replier.reply("출석은 !컷 후 생성되는 웹 출석 링크에서 진행해주세요."); return; }
-    if (text === "!저장진단") {
-      try {
-        var probeName = "guildcore_storage_diagnostic_api2";
-        var probeValue = "test_" + String(Date.now());
-        gcStorageWrite_(probeName, probeValue);
-        replier.reply("✅ GuildCore API2 영구 저장 정상\\n채팅방 연결을 다시 시도하세요: !핑 숭배");
-      } catch (storageError) {
-        replier.reply("❌ 영구 저장 불가: " + String(storageError) +
-          "\\nMessengerBotR 스크립트에서 API2 Database 사용 여부와 앱 저장소 권한을 확인하세요.");
-      }
-      return;
-    }
     if (!string_(channelId).trim()) { replier.reply("❌ API2 방 ID를 읽지 못했습니다. 연결하지 않습니다."); return; }
 
     if (
@@ -946,114 +868,6 @@ function response(
       text === "!도구"
     ) {
       replier.reply(kakaoLocalHelpText_());
-      return;
-    }
-
-    if (text === "!타이머재시작") {
-      /* 명시적인 관리 명령일 때만 재시작한다. 자동으로 중복 타이머를 늘리지 않는다. */
-      try {
-        startKakaoAlertPoller_();
-        replier.reply("🔄 GuildCore 알림 타이머 재시작 요청 완료\n30~60초 후 !알림점검 으로 실제 조회를 확인하세요.");
-      } catch (restartErr) {
-        KAKAO_ALERT_LAST_ERROR_ = "타이머 재시작: " + String(restartErr);
-        replier.reply("❌ 타이머 재시작 실패: " + String(restartErr));
-      }
-      return;
-    }
-
-    if (text === "!방진단") {
-      var rn = String(room || "").trim();
-      var sn = String(sender || "").trim();
-      var ch = string_(channelId).trim();
-      var matched = [];
-      var db = loadRoomBindings_();
-      for (var kk in db) {
-        if (!Object.prototype.hasOwnProperty.call(db, kk)) continue;
-        var bb = db[kk];
-        if (bb && ((rn && String(bb.room_name || "").trim() === rn) ||
-                   (ch && String(bb.channel_id || "").trim() === ch))) matched.push(kk);
-      }
-      var existing = getRoomBinding_(room, channelId);
-      replier.reply("🔎 GuildCore 메시지 수신 진단\n" +
-        "수신 room: [" + rn + "]\n" +
-        "수신 sender: [" + sn + "]\n" +
-        "room = sender: " + (rn === sn ? "예" : "아니오") + "\n" +
-        "isGroupChat: " + String(isGroupChat) + "\n" +
-        "channelId 제공: " + (ch ? "예" : "아니오") + "\n" +
-        "logId 제공: " + (logId != null && String(logId) !== "" ? "예" : "아니오") + "\n" +
-        "userHash 제공: " + (userHash != null && String(userHash) !== "" ? "예" : "아니오") + "\n" +
-        "packageName: " + String(packageName || "없음") + "\n" +
-        "저장 키: " + roomKey_(room, channelId) + "\n" +
-        "일치 기록 수: " + matched.length + "\n" +
-        "연결 연합: " + (existing && existing.alliance_id || "없음") + "\n" +
-        "전체 저장 기록: " + Object.keys(db).length + "\n" +
-        "※ 사용자 고유값·비밀키는 출력하지 않습니다.");
-      return;
-    }
-
-    if (text === "!연결목록") {
-      var dbList = loadRoomBindings_(), names = [], seenNames = {};
-      for (var keyList in dbList) {
-        if (!Object.prototype.hasOwnProperty.call(dbList, keyList)) continue;
-        var item = dbList[keyList];
-        if (!item || item.active !== true) continue;
-        var label = String(item.room_name || "").trim() || "(이름 없음)";
-        if (!seenNames[label]) {seenNames[label] = true; names.push(label); }
-      }
-      names.sort();
-      replier.reply("📋 GuildCore 활성 연결 방 목록 (ID 기준)\n" +
-        (names.length ? names.map(function(n,i){return (i+1)+". "+n;}).join("\\n") : "없음") +
-        "\\n※ 표시된 이름은 봇이 저장한 값이며 실제 방 수와 다를 수 있습니다.");
-      return;
-    }
-
-    if (text === "!발송진단") {
-      var diagnosticBinding = getRoomBinding_(room, channelId);
-      if (!diagnosticBinding || diagnosticBinding.active !== true) {
-        replier.reply("❌ 연결된 방에서만 진단 가능합니다. !핑 연합명");
-        return;
-      }
-      var targetRoom = String(room || diagnosticBinding.room_name || "").trim();
-      var targetId = String(channelId || diagnosticBinding.channel_id || "").trim();
-      var pkg = "com.kakao.talk";
-      var report = ["🔎 API2 v2.0.7 발송 세션 진단", "현재 방: " + targetRoom,
-                    "현재 방 ID: " + targetId];
-      function canReplyCheck_(label, key, packageName) {
-        try {
-          var result = packageName == null
-            ? GC_API2_BOT_.canReply(key)
-            : GC_API2_BOT_.canReply(key, packageName);
-          report.push(label + ": " + String(result));
-          return result === true;
-        } catch (err) {
-          report.push(label + " 예외: " + String(err));
-          return false;
-        }
-      }
-      canReplyCheck_("이름 세션", targetRoom, null);
-      canReplyCheck_("이름+카카오 세션", targetRoom, pkg);
-      canReplyCheck_("ID 세션", targetId, null);
-      canReplyCheck_("ID+카카오 세션", targetId, pkg);
-      var trialText = "🔔 GuildCore v2.0.7 채팅방 자동발송 시험";
-      // Read-only diagnosis. Never send or store the untrusted msg.room alias.
-      var routes = [];
-      var delivered = false;
-      for (var ri = 0; ri < routes.length; ri++) {
-        var route = routes[ri];
-        if (!route.key) continue;
-        try {
-          var outcome = route.pkg == null
-            ? GC_API2_BOT_.send(route.key, trialText)
-            : GC_API2_BOT_.send(route.key, trialText, route.pkg);
-          report.push(route.label + " 발송: " + String(outcome));
-          if (outcome === true) { delivered = true; break; }
-        } catch (sendErr) {
-          report.push(route.label + " 예외: " + String(sendErr));
-        }
-      }
-      report.push("진단은 안전을 위해 발송·별칭등록을 하지 않습니다.");
-      report.push("!발송방등록 정확한방이름 → !발송확인 순서로 등록하세요.");
-      replier.reply(report.join("\n"));
       return;
     }
 
@@ -1109,40 +923,6 @@ function response(
       return;
     }
 
-    // In Kakao open chat msg.room may be the notification session key
-    // (a sender display name), not the actual visible group title.
-    // Test exactly one message, then require explicit in-room confirmation.
-    if (text === "!오픈방시험") {
-      var bound = getRoomBinding_(room, channelId);
-      if (!bound || bound.active !== true || !isGroupChat) {
-        replier.reply("❌ 연결된 단체방에서만 사용 가능합니다."); return;
-      }
-      var sessionKey = String(room || "").trim();
-      if (!sessionKey) {replier.reply("❌ 메시지에서 발송 세션 키를 찾지 못했습니다.");return;}
-      var stored = loadRoomBindings_(), ownKey = roomKey_(room, channelId);
-      for (var otherKey in stored) {
-        if (!Object.prototype.hasOwnProperty.call(stored, otherKey) || otherKey === ownKey) continue;
-        if (stored[otherKey] && stored[otherKey].active === true &&
-            (String(stored[otherKey].room_name || "") === sessionKey ||
-             String(stored[otherKey].pending_send_alias || "") === sessionKey)) {
-          replier.reply("❌ 발송 세션 키가 다른 연결방과 중복됩니다. 자동발송을 활성화하지 않습니다."); return;
-        }
-      }
-      var nonce = String(Date.now()).slice(-6);
-      var proof = "🔔 GuildCore 오픈방 자동발송 시험 [" + nonce + "]\n이 단체방에 도착했을 때만 !발송확인 입력";
-      var sendOk = false;
-      try {sendOk = GC_API2_BOT_.send(sessionKey, proof, "com.kakao.talk") === true;}
-      catch (openError) { replier.reply("❌ 오픈방 시험 예외: " + String(openError)); return; }
-      if (!sendOk) {replier.reply("❌ 오픈방 발송 세션 없음. bot.send()가 false를 반환했습니다.");return;}
-      stored[ownKey].room_name = "";
-      stored[ownKey].send_alias_source = "";
-      stored[ownKey].pending_send_alias = sessionKey;
-      stored[ownKey].pending_send_alias_at = new Date().toISOString();
-      stored[ownKey].pending_send_proof = nonce;
-      if(!saveRoomBindings_(stored)) throw new Error("시험 연결정보 저장 실패");
-      replier.reply("🔎 시험번호 [" + nonce + "] 메시지가 이 단체방에 실제 보이면 !발송확인 입력\n다른 대화로 도착했다면 확인하지 마세요.");
-      return;
-    }
     if (text === "!발송확인") {
       var pendingBinding = getRoomBinding_(room, channelId);
       if (!pendingBinding || pendingBinding.active !== true || !isGroupChat) {
@@ -1165,33 +945,6 @@ function response(
       replier.reply("✅ 자동발송 대상 확정: "+pending);
       return;
     }
-    if (text === "!알림점검") {
-      var b = getRoomBinding_(room, channelId);
-      replier.reply(
-        "🔎 GuildCore 자동알림 진단\n" +
-        "방 연결: " + (b && b.active === true ? "활성" : "비활성") + "\n" +
-        "타이머: " + KAKAO_ALERT_TIMER_MODE_ + "\n" +
-        "스레드 생존: " + (KAKAO_ALERT_THREAD_ ? String(KAKAO_ALERT_THREAD_.isAlive()) : "없음") + "\n" +
-        "타이머 소유권: " + (String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) === KAKAO_TIMER_OWNER_ ? "일치" : "불일치") + "\n" +
-        "현재 명령 처리 중: " + String(KAKAO_COMMAND_BUSY_) + "\n" +
-        "현재 방 연합: " + (b && b.alliance_id || "없음") + "\n" +
-        "방 유형: " + (b && b.room_type || "미등록") + "\n" +
-        "자동발송 이름: " + (b && b.send_alias_source === "manual_confirmed" && b.room_name || "미확인 · !발송방등록 정확한방이름 필요") + "\n" +
-        "전체 활성 연결 수: " + activeRoomEntries_().length + "\n" +
-        "연결기록 자동정리: " + GC_CLEANUP_REPORT_ + "\n" +
-        roomBindingAuditText_() + "\n" +
-        "마지막 조회: " + KAKAO_ALERT_LAST_POLL_ + "\n" +
-        "마지막 조회 알림 수: " + KAKAO_ALERT_LAST_COUNT_ + "\n" +
-        "마지막 오류: " + KAKAO_ALERT_LAST_ERROR_ + "\n" +
-        "발송 시도 성공: " + KAKAO_ALERT_SENT_COUNT_ + "\n" +
-        "중복 차단: " + KAKAO_ALERT_SKIPPED_COUNT_ + "\n" +
-        "결과 불확실: " + KAKAO_ALERT_UNCERTAIN_COUNT_ + "\n" +
-        "마지막 전송 상세: " + KAKAO_SEND_LAST_DETAIL_ + "\n" +
-        "조회 주기: 30초"
-      );
-      return;
-    }
-
     /* 연결상태: 저장된 방 매핑 + V6 실제 연결을 함께 확인 */
     if (text === "!연결상태") {
       var statusBinding = getRoomBinding_(room, channelId);
