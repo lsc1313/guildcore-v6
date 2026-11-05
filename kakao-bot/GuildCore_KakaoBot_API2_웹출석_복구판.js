@@ -854,6 +854,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
+    "!오픈방시험 → !발송확인 · !알림점검",
     "!발송방등록 정확한방이름 → !발송확인 · !알림점검",
     "!알림점검 · !발송진단 · !방진단 · !연결목록 · !타이머재시작",
     "",
@@ -1108,12 +1109,47 @@ function response(
       return;
     }
 
+    // In Kakao open chat msg.room may be the notification session key
+    // (a sender display name), not the actual visible group title.
+    // Test exactly one message, then require explicit in-room confirmation.
+    if (text === "!오픈방시험") {
+      var bound = getRoomBinding_(room, channelId);
+      if (!bound || bound.active !== true || !isGroupChat) {
+        replier.reply("❌ 연결된 단체방에서만 사용 가능합니다."); return;
+      }
+      var sessionKey = String(room || "").trim();
+      if (!sessionKey) {replier.reply("❌ 메시지에서 발송 세션 키를 찾지 못했습니다.");return;}
+      var stored = loadRoomBindings_(), ownKey = roomKey_(room, channelId);
+      for (var otherKey in stored) {
+        if (!Object.prototype.hasOwnProperty.call(stored, otherKey) || otherKey === ownKey) continue;
+        if (stored[otherKey] && stored[otherKey].active === true &&
+            (String(stored[otherKey].room_name || "") === sessionKey ||
+             String(stored[otherKey].pending_send_alias || "") === sessionKey)) {
+          replier.reply("❌ 발송 세션 키가 다른 연결방과 중복됩니다. 자동발송을 활성화하지 않습니다."); return;
+        }
+      }
+      var nonce = String(Date.now()).slice(-6);
+      var proof = "🔔 GuildCore 오픈방 자동발송 시험 [" + nonce + "]\n이 단체방에 도착했을 때만 !발송확인 입력";
+      var sendOk = false;
+      try {sendOk = GC_API2_BOT_.send(sessionKey, proof, "com.kakao.talk") === true;}
+      catch (openError) { replier.reply("❌ 오픈방 시험 예외: " + String(openError)); return; }
+      if (!sendOk) {replier.reply("❌ 오픈방 발송 세션 없음. bot.send()가 false를 반환했습니다.");return;}
+      stored[ownKey].room_name = "";
+      stored[ownKey].send_alias_source = "";
+      stored[ownKey].pending_send_alias = sessionKey;
+      stored[ownKey].pending_send_alias_at = new Date().toISOString();
+      stored[ownKey].pending_send_proof = nonce;
+      if(!saveRoomBindings_(stored)) throw new Error("시험 연결정보 저장 실패");
+      replier.reply("🔎 시험번호 [" + nonce + "] 메시지가 이 단체방에 실제 보이면 !발송확인 입력\n다른 대화로 도착했다면 확인하지 마세요.");
+      return;
+    }
     if (text === "!발송확인") {
       var pendingBinding = getRoomBinding_(room, channelId);
       if (!pendingBinding || pendingBinding.active !== true || !isGroupChat) {
         replier.reply("❌ 연결된 단체방에서만 확인할 수 있습니다."); return;
       }
       var pending = String(pendingBinding.pending_send_alias || "");
+      // A sender-looking key is permitted only after an in-room proof message.
       var pendingAt = Date.parse(String(pendingBinding.pending_send_alias_at || ""));
       if (!pending || !isFinite(pendingAt) || Date.now()-pendingAt > 300000) {
         replier.reply("❌ 유효한 시험 발송 기록이 없습니다. !발송방등록 정확한방이름 을 다시 입력하세요."); return;
