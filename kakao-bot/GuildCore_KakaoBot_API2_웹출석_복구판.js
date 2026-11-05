@@ -76,47 +76,47 @@ function roomKey_(room, channelId) {
   return "channel:" + ch;
 }
 
-function loadRoomBindings_() {
-  var raw = "";
-  try {
-    if (
-      typeof DataBase !== "undefined" &&
-      DataBase &&
-      typeof DataBase.getDataBase === "function"
-    ) {
-      raw = DataBase.getDataBase(ROOM_BINDING_DB_NAME_) || "";
-    }
-  } catch (e) {
-    raw = "";
+/* API2 persistent storage. Never silently downgrade to RAM-only storage. */
+function gcStorageRead_(name) {
+  if (typeof Database !== "undefined" && Database && typeof Database.readString === "function") {
+    return String(Database.readString(name) || "");
   }
-
-  if (raw) {
-    try {
-      var parsed = JSON.parse(String(raw));
-      if (parsed && typeof parsed === "object") {
+  if (typeof DataBase !== "undefined" && DataBase && typeof DataBase.getDataBase === "function") {
+    return String(DataBase.getDataBase(name) || "");
+  }
+  throw new Error("API2 Database.readString API 없음");
+}
+function gcStorageWrite_(name, value) {
+  var valueStr = String(value);
+  if (typeof Database !== "undefined" && Database &&
+      typeof Database.writeString === "function" && typeof Database.readString === "function") {
+    Database.writeString(name, valueStr);
+  } else if (typeof DataBase !== "undefined" && DataBase &&
+      typeof DataBase.setDataBase === "function" && typeof DataBase.getDataBase === "function") {
+    DataBase.setDataBase(name, valueStr);
+  } else {
+    throw new Error("영구 저장 API 없음 (Database.writeString)");
+  }
+  if (gcStorageRead_(name) !== valueStr) throw new Error("영구 저장 검증 실패");
+}
+function loadRoomBindings_() {
+  try {
+    var raw = gcStorageRead_(ROOM_BINDING_DB_NAME_);
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         ROOM_BINDINGS_MEMORY_ = parsed;
         return parsed;
       }
-    } catch (e2) {}
-  }
-
+    }
+  } catch (e) { KAKAO_ALERT_LAST_ERROR_ = "연결 DB 읽기 오류: " + String(e); }
   return ROOM_BINDINGS_MEMORY_ || {};
 }
-
 function saveRoomBindings_(bindings) {
-  ROOM_BINDINGS_MEMORY_ = bindings || {};
   try {
-    if (
-      typeof DataBase !== "undefined" &&
-      DataBase &&
-      typeof DataBase.setDataBase === "function"
-    ) {
-      DataBase.setDataBase(ROOM_BINDING_DB_NAME_, JSON.stringify(ROOM_BINDINGS_MEMORY_));
-      if (String(DataBase.getDataBase(ROOM_BINDING_DB_NAME_) || "") !== JSON.stringify(ROOM_BINDINGS_MEMORY_))
-        throw new Error("연결 DB 저장 검증 실패");
-      return true;
-    }
-    throw new Error("DataBase 저장 API 없음");
+    gcStorageWrite_(ROOM_BINDING_DB_NAME_, JSON.stringify(bindings || {}));
+    ROOM_BINDINGS_MEMORY_ = bindings || {};
+    return true;
   } catch (e) {
     KAKAO_ALERT_LAST_ERROR_ = "연결 DB 저장 실패: " + String(e);
     try { Log.e(KAKAO_ALERT_LAST_ERROR_); } catch (_) {}
@@ -134,11 +134,11 @@ var GC_LAST_TOUCH_BY_ROOM_ = {};
 var GC_CLEANUP_REPORT_ = "미실행";
 
 function gcGetFlag_() {
-  try { return String(DataBase.getDataBase(GC_BINDING_MIGRATION_FLAG_)||"") === "done"; }
+  try { return gcStorageRead_(GC_BINDING_MIGRATION_FLAG_) === "done"; }
   catch (_) { return false; }
 }
 function gcSetFlag_() {
-  try { DataBase.setDataBase(GC_BINDING_MIGRATION_FLAG_, "done"); return true; }
+  try { gcStorageWrite_(GC_BINDING_MIGRATION_FLAG_, "done"); return true; }
   catch (_) { return false; }
 }
 function gcRoomName_(b) { return String(b && b.room_name || "").trim(); }
@@ -395,32 +395,22 @@ function sendWorkerCommand_(text, allianceId, room, sender, replier, packageName
    ========================================================= */
 
 function loadAlertDelivery_() {
-  var raw = "";
   try {
-    if (typeof DataBase !== "undefined" && DataBase && typeof DataBase.getDataBase === "function") {
-      raw = DataBase.getDataBase(ALERT_DELIVERY_DB_NAME_) || "";
-    }
-  } catch (e) { raw = ""; }
-
-  if (raw) {
-    try {
-      var parsed = JSON.parse(String(raw));
-      if (parsed && typeof parsed === "object") {
+    var raw = gcStorageRead_(ALERT_DELIVERY_DB_NAME_);
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         ALERT_DELIVERY_MEMORY_ = parsed;
         return parsed;
       }
-    } catch (e2) {}
-  }
+    }
+  } catch(e) { KAKAO_ALERT_LAST_ERROR_ = "발송기록 읽기 오류: " + String(e); }
   return ALERT_DELIVERY_MEMORY_ || {};
 }
-
 function saveAlertDelivery_(data) {
-  ALERT_DELIVERY_MEMORY_ = data || {};
   try {
-    if (typeof DataBase === "undefined" || !DataBase || typeof DataBase.setDataBase !== "function" || typeof DataBase.getDataBase !== "function") throw new Error("DataBase API 없음");
-    var serialized = JSON.stringify(ALERT_DELIVERY_MEMORY_);
-    DataBase.setDataBase(ALERT_DELIVERY_DB_NAME_, serialized);
-    if (String(DataBase.getDataBase(ALERT_DELIVERY_DB_NAME_) || "") !== serialized) throw new Error("발송기록 저장 검증 실패");
+    gcStorageWrite_(ALERT_DELIVERY_DB_NAME_, JSON.stringify(data || {}));
+    ALERT_DELIVERY_MEMORY_ = data || {};
     return true;
   } catch (e) {
     KAKAO_ALERT_LAST_ERROR_ = "발송기록 저장 실패: " + String(e);
@@ -876,6 +866,18 @@ function response(
     gcTouchRoom_(room, channelId);
     if (text.indexOf("!") !== 0) return;
     if (/^!(참여|취소)(?:\s|$)/.test(text)) { replier.reply("출석은 !컷 후 생성되는 웹 출석 링크에서 진행해주세요."); return; }
+    if (text === "!저장진단") {
+      try {
+        var probeName = "guildcore_storage_diagnostic_api2";
+        var probeValue = "test_" + String(Date.now());
+        gcStorageWrite_(probeName, probeValue);
+        replier.reply("✅ GuildCore API2 영구 저장 정상\\n채팅방 연결을 다시 시도하세요: !핑 숭배");
+      } catch (storageError) {
+        replier.reply("❌ 영구 저장 불가: " + String(storageError) +
+          "\\nMessengerBotR 스크립트에서 API2 Database 사용 여부와 앱 저장소 권한을 확인하세요.");
+      }
+      return;
+    }
     if (!string_(channelId).trim()) { replier.reply("❌ API2 방 ID를 읽지 못했습니다. 연결하지 않습니다."); return; }
 
     if (
