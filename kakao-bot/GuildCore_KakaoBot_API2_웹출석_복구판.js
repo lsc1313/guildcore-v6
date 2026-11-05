@@ -656,6 +656,8 @@ function pollKakaoAlerts_() {
         for (var a = 0; a < alerts.length; a++) {
           var alert = alerts[a] || {}, alertId = String(alert.alert_id || "");
           if (!alertId) continue;
+          // Defense in depth: never send 1-minute or spawn alerts, even from legacy queues.
+          if (String(alert.alert_type || "") !== "10m" && String(alert.alert_type || "") !== "5m") continue;
           var status = "sent", deliveryId = "alert:" + alertId;
           for (var r = 0; r < rooms.length; r++) {
             var entry = rooms[r], msg = String(alert.message || "");
