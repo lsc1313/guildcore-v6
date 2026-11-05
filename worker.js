@@ -1579,6 +1579,7 @@ async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=
 async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOperate(env,token,aid);await gcAttendanceReportSchema_(env);return await all(env.DB,"SELECT report_id,start_day,end_day,status,created_at,sent_at,error FROM kakao_attendance_reports WHERE alliance_id=? ORDER BY created_at DESC LIMIT 50",aid);}
 
 const RPC = {
+  webAttendanceInfo, webAttendanceToggle,
   webLogin, webWhoAmI, webLogout, issueAllianceLeaderBootstrapPin,
   getAllianceHomeData, getGuildAppData, getAdminStructure, previewKakaoAttendanceReport, queueKakaoAttendanceReport, listKakaoAttendanceReports, saveLobbyTheme, saveLoginBackground, getMyAttendanceSummary, saveAttendanceWeekRule, listAllianceFaq, saveAllianceFaq, deleteAllianceFaq,
   createAllianceWorkspace, renameAlliance, deactivateAlliance, restoreAlliance, deleteAlliancePermanently,
@@ -2197,7 +2198,7 @@ function botBossNextLabel_(b){
   }
   return next.slice(-5);
 }
-function botKakaoHelp_(){return ["📌 GuildCore 카톡 명령어","","[연결/동기화]","!초기설정 [연합명] · !서버연결 [연합명]","!동기화 · !서버연결해제 · !핑 [연합명]","","[기본/보스]","!등록 길드명 게임닉네임","!웹핀 · 웹 로그인 10분/1회용 PIN","!보스 / !보스확인 / !보탐","!컷 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!젠 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!내출석 [YYYY-MM]","!보탐대조 [보스명] · Discord/UI 스샷 분석 결과 조회","","[출석 운영]","!참여체크생성 제목","!참여 [보스명|참여체크 제목] · !취소 [보스명|참여체크 제목]","!출석종료 보스명|참여체크 제목","!참여삭제 보스명 닉네임","","[알림방 설정 · 연합운영진+]","!보스알림채널설정 [전체|월드|서버명]","!출석채널설정 [전체|월드|서버명]","!보스알림테스트 [전체|월드|서버명]","","[보스 설정]","월드: 연합장/연합운영진 · 서버: 해당 서버 길드장/부길드장/길드운영진","!보스등록 월드|서버명 보스명 쿨|고정|주간 값","!보스수정 보스명 쿨|고정|주간 값","!보스제거 보스명","","[공지/길드]","!연합공지 제목 | 내용","!길드공지 제목 | 내용","!공지확인 연합|길드","!길드원확인 · !길드원추가 닉네임 [직급]","","[아이템/자금/통계]","!아이템내역 · !아이템등록 이름 [수량]","!아이템판매 이름 금액","!길드비용현황 · !길드비용 수입|지출 금액 [메모]","!참여통계 [시작] [종료] · !정산조회 [시작] [종료]","","추가: !연결상태 · !연결초기화 · !핑해제 · !참여 · !취소","Web UI · Discord · Kakao는 같은 GuildCore D1 데이터를 사용합니다.","!도움 / !명령어"].join("\n");}
+function botKakaoHelp_(){return ["📌 GuildCore 카톡 명령어","","[연결/동기화]","!초기설정 [연합명] · !서버연결 [연합명]","!동기화 · !서버연결해제 · !핑 [연합명]","","[기본/보스]","!등록 길드명 게임닉네임","!웹핀 · 웹 로그인 10분/1회용 PIN","!보스 / !보스확인 / !보탐","!컷 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!젠 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!내출석 [YYYY-MM]","!보탐대조 [보스명] · Discord/UI 스샷 분석 결과 조회","","[출석 운영]","!참여체크생성 제목","출석은 !컷 후 생성되는 웹 링크에서 참여","!출석종료 보스명|참여체크 제목","!참여삭제 보스명 닉네임","","[알림방 설정 · 연합운영진+]","!보스알림채널설정 [전체|월드|서버명]","!출석채널설정 [전체|월드|서버명]","!보스알림테스트 [전체|월드|서버명]","","[보스 설정]","월드: 연합장/연합운영진 · 서버: 해당 서버 길드장/부길드장/길드운영진","!보스등록 월드|서버명 보스명 쿨|고정|주간 값","!보스수정 보스명 쿨|고정|주간 값","!보스제거 보스명","","[공지/길드]","!연합공지 제목 | 내용","!길드공지 제목 | 내용","!공지확인 연합|길드","!길드원확인 · !길드원추가 닉네임 [직급]","","[아이템/자금/통계]","!아이템내역 · !아이템등록 이름 [수량]","!아이템판매 이름 금액","!길드비용현황 · !길드비용 수입|지출 금액 [메모]","!참여통계 [시작] [종료] · !정산조회 [시작] [종료]","","추가: !연결상태 · !연결초기화 · !핑해제","Web UI · Discord · Kakao는 같은 GuildCore D1 데이터를 사용합니다.","!도움 / !명령어"].join("\n");}
 async function botKakaoCommand_(env,aid,p){
   const text=String(p.text||"").trim(),key=String(p.kakao_user_key||"").trim();if(!text.startsWith("!"))return {reply:""};const tokens=text.slice(1).trim().split(/\s+/).filter(Boolean),cmd=String(tokens.shift()||""),args=tokens;
   if(cmd==="핑")return {reply:`✅ GuildCore ${APP_VERSION} 정상 연결\n카톡 → Worker → D1\n${aid}`};
@@ -2207,10 +2208,10 @@ async function botKakaoCommand_(env,aid,p){
   if(cmd==="등록"){if(args.length<2)throw new Error("사용법: !등록 길드명 게임닉네임");const guild=args.shift(),nick=args.join(" "),r=await botRegisterKakaoMember_(env,aid,{...p,guild_key:guild,game_nickname:nick});return {reply:`✅ 등록 완료\n길드: ${r.guild_name}\n닉네임: ${r.game_nickname}`};}
   if(cmd==="웹핀"){const r=await botWebPinSelf_(env,aid,{...p,kakao_user_key:key});return {reply:`🔐 웹 로그인 PIN: ${r.pin}\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
   if(cmd==="보스"||cmd==="보스확인"||cmd==="보탐"){const list=await botBosses_(env,aid,{kakao_user_key:key});if(!list.length)return {reply:"등록된 활성 보스가 없습니다."};const groups={};for(const b of list){const k=b.boss_scope==="WORLD"?"월드":b.server_name;(groups[k]||(groups[k]=[])).push(b);}const out=[];const keys=Object.keys(groups).sort((a,b)=>a==="월드"?1:(b==="월드"?-1:a.localeCompare(b,"ko",{numeric:true})));for(const k of keys){out.push(`[${k}]`);const rows=groups[k].sort((a,b)=>{const av=String(a.next_spawn_at||"9999-12-31 23:59"),bv=String(b.next_spawn_at||"9999-12-31 23:59");const c=av.localeCompare(bv);return c||String(a.boss_name||"").localeCompare(String(b.boss_name||""),"ko");});for(const b of rows)out.push(`${b.boss_name} · 컷 ${b.last_kill_at?b.last_kill_at.slice(-5):"-"} · 예정 ${botBossNextLabel_(b)}`);}return {reply:out.join("\n")};}
-  if(cmd==="컷"){if(!args.length)throw new Error("사용법: !컷 보스명 [HH:MM|HHMM]");let cutAt="",lastCut=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastCut)||/^\d{2}:\d{2}$/.test(lastCut))){if(!isClockInput_(lastCut))throw new Error("컷 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");cutAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossCut_(env,aid,{kakao_user_key:key,boss,cut_at:cutAt});let s=`${r.boss_name}\n컷 ${r.cut_at.slice(-5)}\n예정 ${r.next_spawn_at.slice(-5)}`;if(r.event_id)s+=`\n\n참여: !참여 ${r.boss_name} · 취소: !취소 ${r.boss_name}`;return {reply:s,event_id:r.event_id||"",sync_attendance:!!r.event_id};}
+  if(cmd==="컷"){if(!args.length)throw new Error("사용법: !컷 보스명 [HH:MM|HHMM]");let cutAt="",lastCut=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastCut)||/^\d{2}:\d{2}$/.test(lastCut))){if(!isClockInput_(lastCut))throw new Error("컷 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");cutAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossCut_(env,aid,{kakao_user_key:key,boss,cut_at:cutAt});let s=`${r.boss_name}\n컷 ${r.cut_at.slice(-5)}\n예정 ${r.next_spawn_at.slice(-5)}`;if(r.event_id)s+=`\n\n🔗 출석체크: ${webAttendanceUrl_("https://6.lsc1313.workers.dev",r.event_id)}`;return {reply:s,event_id:r.event_id||"",sync_attendance:!!r.event_id};}
   if(cmd==="젠"){if(!args.length)throw new Error("사용법: !젠 보스명 [HH:MM|HHMM]");let spawnAt="",lastSpawn=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastSpawn)||/^\d{2}:\d{2}$/.test(lastSpawn))){if(!isClockInput_(lastSpawn))throw new Error("젠 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");spawnAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossSpawn_(env,aid,{kakao_user_key:key,boss,spawn_at:spawnAt});return {reply:`${r.boss_name}\n예정 ${r.next_spawn_at?r.next_spawn_at.slice(-5):"-"}`};}
-  if(cmd==="참여체크생성"){const title=args.join(" ").trim();if(!title)throw new Error("사용법: !참여체크생성 제목");const r=await botParticipationCreate_(env,aid,{kakao_user_key:key,title});return {reply:`✅ 참여체크 생성\n${r.title}\n참여: !참여 ${r.title}\n취소: !취소 ${r.title}\n종료: !출석종료 ${r.title}`,event_id:r.event_id||"",sync_attendance:true};}
-  if(cmd==="참여"||cmd==="취소"){const target=args.join(" ").trim(),e=await botOpenEvent_(env,aid,target,{kakao_user_key:key}),r=await botAttendanceSet_(env,aid,{kakao_user_key:key,event_id:e.event_id,attended:cmd==="참여"});if(cmd==="취소"&&r.attended){const ls=Array.isArray(r.remaining_source_labels)?r.remaining_source_labels:[];return {reply:`↩️ Kakao 출첵 취소 · ${r.boss_name} · ${r.nickname}\n✅ 다른 확인 경로${ls.length?` [${ls.join("+")}]`:""}가 남아 실제 참여는 유지됩니다.`,event_id:r.event_id||"",sync_attendance:true};}return {reply:r.already_registered?`ℹ️ 이미 참여 등록됨 · ${r.boss_name} · ${r.nickname}`:`${cmd==="참여"?"✅ 참여":"↩️ 취소"} · ${r.boss_name} · ${r.nickname}`,event_id:r.event_id||"",sync_attendance:!r.already_registered};}
+  if(cmd==="참여체크생성"){const title=args.join(" ").trim();if(!title)throw new Error("사용법: !참여체크생성 제목");const r=await botParticipationCreate_(env,aid,{kakao_user_key:key,title});return {reply:`✅ 참여체크 생성\n${r.title}\n출석 링크: ${webAttendanceUrl_("https://6.lsc1313.workers.dev",r.event_id)}\n종료: !출석종료 ${r.title}`,event_id:r.event_id||"",sync_attendance:true};}
+  if(cmd==="참여"||cmd==="취소")return {reply:"출석은 보스 컷 메시지의 웹 출석 링크에서 진행해주세요."};
   if(cmd==="출석종료"){if(!args.length)throw new Error("사용법: !출석종료 보스명|참여체크 제목");const r=await botAttendanceClose_(env,aid,{kakao_user_key:key,boss:args.join(" ")});return {reply:r.summary||r.message,attendance_result_id:r.result_id||"",event_id:r.event_id||"",sync_attendance:true};}
   if(cmd==="참여삭제"){if(args.length<2)throw new Error("사용법: !참여삭제 보스명 닉네임");const r=await botAttendanceRemove_(env,aid,{kakao_user_key:key,boss:args[0],nickname:args.slice(1).join(" ")});return {reply:`✅ ${r.message}\n현재 참여 ${(r.attendance.participants||[]).map(x=>x.nickname).join(" · ")}`,event_id:r.event_id||"",sync_attendance:true};}
   if(cmd==="보탐대조"){const r=await botScreenshotLatest_(env,aid,{kakao_user_key:key,boss:args.join(" ")});if(r.empty)return {reply:`📸 ${r.boss_name} · 저장된 스크린샷 대조 결과가 없습니다.`};const names=function(rows){return (rows||[]).map(x=>{const n=x.nickname||x.text||"";const ls=Array.isArray(x.source_labels)?x.source_labels:[];return n+(ls.length?` [${ls.join("+")}]`:"")}).filter(Boolean).join(" · ")||"-"};const grouped=function(rows){const g={};for(const x of rows||[]){const k=(x.server_name?x.server_name+" / ":"")+(x.guild_name||"기타");(g[k]||(g[k]=[])).push(x)}return Object.keys(g).sort((a,b)=>a.localeCompare(b,"ko")).map(k=>`[${k}] ${names(g[k])}`).join("\n")||"-"};return {reply:`📸 ${r.boss_name} 보탐 대조
@@ -2346,10 +2347,67 @@ async function handleDirectKakao_(request,env){
   }catch(e){return json({ok:false,error:errorMessage(e)},400)}
 }
 
+
+async function webAttendanceIdentity_(env,token,eventId){
+  const raw=await getSession(env,token);
+  if(!raw||raw.is_superadmin||!raw.member_id)throw new Error("웹핀 로그인이 필요합니다.");
+  const ctx=await refreshContext(env,raw);
+  const e=await first(env.DB,"SELECT * FROM boss_events WHERE event_id=?",String(eventId||""));
+  if(!e)throw new Error("출석 회차를 찾을 수 없습니다.");
+  if(String(ctx.alliance_id)!==String(e.alliance_id))throw new Error("다른 연합의 출석 링크입니다.");
+  if(String(e.boss_scope||"WORLD")==="SERVER"&&String(ctx.server_id||"")!==String(e.server_id||""))throw new Error("해당 서버 길드원만 참여할 수 있습니다.");
+  return {ctx,e};
+}
+async function webAttendanceInfo(env,token,eventId){
+  const {ctx,e}=await webAttendanceIdentity_(env,token,eventId);
+  const row=await first(env.DB,"SELECT attended FROM boss_attendance WHERE event_id=? AND member_id_at_event=? ORDER BY recorded_at DESC LIMIT 1",e.event_id,ctx.member_id);
+  const sources=await attendanceExplicitSourcesForMember_(env,e.alliance_id,e.event_id,ctx.member_id);
+  return {boss_name:e.boss_name,nickname:ctx.nickname,open:e.attendance_status==="open"&&(!e.attendance_closes_at||Date.parse(e.attendance_closes_at)>Date.now()),attended:sources.includes("web"),effective_attended:!!Number(row?.attended||0)};
+}
+async function webAttendanceToggle(env,token,eventId,attended){
+  const {ctx,e}=await webAttendanceIdentity_(env,token,eventId);
+  if(e.attendance_status!=="open"||(e.attendance_closes_at&&Date.parse(e.attendance_closes_at)<=Date.now()))throw new Error("출석이 마감되었습니다.");
+  const m=await first(env.DB,"SELECT m.*,g.guild_name,g.server_id,g.game_server_name FROM members m JOIN guilds g ON m.guild_id=g.guild_id WHERE m.member_id=? AND m.guild_id=? AND m.status='활성'",ctx.member_id,ctx.guild_id);
+  if(!m)throw new Error("활성 길드원 정보를 찾을 수 없습니다.");
+  const aid=e.alliance_id,mid=ctx.member_id,on=!!attended,now=nowIso();
+  const old=await first(env.DB,"SELECT * FROM boss_attendance WHERE event_id=? AND member_id_at_event=? ORDER BY recorded_at DESC LIMIT 1",e.event_id,mid);
+  const sources=await attendanceExplicitSourcesForMember_(env,aid,e.event_id,mid);
+  if(on){
+    if(sources.includes("web"))return {ok:true,attended:true,already_registered:true};
+    if(old&&old.source)await recordAttendanceEvidence_(env,aid,e.event_id,mid,old.source,"legacy source");
+    // Conditional INSERT limits duplicate writes; a unique event/member index is still needed for strict concurrent atomicity.
+    if(old)await run(env.DB,"UPDATE boss_attendance SET attended=1,cancelled_at='',source='web',recorded_at=? WHERE attendance_id=?",now,old.attendance_id);
+    else await run(env.DB,"INSERT INTO boss_attendance(attendance_id,alliance_id,event_id,boss_id,discord_user_id,guild_id_at_event,guild_name_at_event,server_id_at_event,server_name_at_event,member_id_at_event,game_nickname_at_event,attended,recorded_at,cancelled_at,online_status_snapshot,source,note) SELECT ?,?,?,?,?,?,?,?,?,?,?,1,?,'','','web','' WHERE NOT EXISTS(SELECT 1 FROM boss_attendance WHERE event_id=? AND member_id_at_event=?)",uid("att"),aid,e.event_id,e.boss_id,"",m.guild_id,m.guild_name,m.server_id||"",m.game_server_name||"",mid,m.nickname,now,e.event_id,mid);
+    await recordAttendanceEvidence_(env,aid,e.event_id,mid,"web","self-service attendance");
+  }else{
+    if(!sources.includes("web"))return {ok:true,attended:false,already_cancelled:true};
+    await removeAttendanceEvidence_(env,aid,e.event_id,mid,"web");
+    const remaining=await attendanceExplicitSourcesForMember_(env,aid,e.event_id,mid);
+    if(old)await run(env.DB,"UPDATE boss_attendance SET attended=?,cancelled_at=?,source=? WHERE attendance_id=?",remaining.length?1:0,remaining.length?"":now,remaining[0]||"web",old.attendance_id);
+  }
+  await queueAttendanceSync_(env,aid,e.event_id,"upsert","web self attendance");
+  return {ok:true,attended:on};
+}
+
+// Web attendance link entry: an event identifier is never an authentication credential.
+function webAttendanceUrl_(origin, eventId){return origin.replace(/\/$/,"")+"/attendance?event="+encodeURIComponent(String(eventId||""));}
+function webAttendancePage_(){
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GuildCore 출석</title><style>body{margin:0;background:#080e1b;color:#f3f6ff;font:16px system-ui;display:grid;place-items:center;min-height:100vh}.panel{width:min(90vw,420px);background:#131f35;border:1px solid #34435e;border-radius:20px;padding:24px;box-sizing:border-box}button{width:100%;padding:16px;border:0;border-radius:12px;background:#3285fa;color:white;font-size:17px;font-weight:700}p{line-height:1.6;color:#b9c8dd}a{color:#91c4ff}</style></head><body><div class="panel"><h2>GuildCore 출석</h2><p id="status">로그인 상태를 확인하는 중...</p><button id="action" hidden>참여하기</button><p><a href="/" id="login">웹핀 로그인 / 메인으로</a></p></div><script>
+const id=new URLSearchParams(location.search).get("event");
+const token=localStorage.getItem("guildcore_web_token")||"";
+const status=document.getElementById("status"),btn=document.getElementById("action");
+async function rpc(method,args){const r=await fetch("/rpc",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method,args})});const j=await r.json();if(!j.ok)throw Error(j.error||"요청 실패");return j.data;}
+async function refresh(){try{if(!id)throw Error("출석 링크가 올바르지 않습니다.");const data=await rpc("webAttendanceInfo",[token,id]);status.textContent=data.boss_name+" · "+data.nickname+" · "+(data.open?"출석 진행 중":"출석 마감");btn.hidden=!data.open;btn.textContent=data.attended?"참여 취소":"참여하기";btn.onclick=async()=>{btn.disabled=true;try{await rpc("webAttendanceToggle",[token,id,!data.attended]);await refresh()}catch(e){status.textContent=e.message}finally{btn.disabled=false}};}catch(e){status.textContent=e.message+" 웹핀 로그인이 필요하면 메인에서 로그인한 뒤 이 링크를 다시 열어주세요.";btn.hidden=true;}}
+refresh();
+</script></body></html>`;
+}
+
+
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/attendance") return new Response(webAttendancePage_(),{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}});
       if (request.method === "GET" && url.pathname === "/health") {
         return json({ok:true,version:APP_VERSION,engine:"Cloudflare Worker + D1"});
       }
