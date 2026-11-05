@@ -9,7 +9,8 @@
  * Discord / Kakao / Web UI가 같은 데이터를 보도록 하는 연결 기반 버전입니다.
  *
  * 연결 규칙:
- * - !핑 [연합명] : 현재 카톡방을 해당 연합에 연결
+ * - !핑 [연합명] : 연합 공지방 연결
+ * - !핑 [연합명] [길드명] : 해당 연합의 길드방 연결
  * - !핑          : 이미 연결 이력이 있으면 같은 연합으로 다시 활성화
  *                  연결 이력이 없고 활성 연합이 1개면 자동 연결
  *                  활성 연합이 여러 개면 연합명 입력 안내
@@ -194,7 +195,7 @@ function getRoomBinding_(room, channelId) {
   return loadRoomBindings_()["channel:" + ch] || null;
 }
 
-function saveRoomBinding_(room, channelId, allianceId, allianceName, active) {
+function saveRoomBinding_(room, channelId, allianceId, allianceName, active, roomType, guildId, guildName, serverId) {
   var bindings = loadRoomBindings_();
   var key = roomKey_(room, channelId);
   var old = bindings[key] || {};
@@ -204,6 +205,10 @@ function saveRoomBinding_(room, channelId, allianceId, allianceName, active) {
     channel_id: string_(channelId) || String(old.channel_id || ""),
     alliance_id: String(allianceId || old.alliance_id || ""),
     alliance_name: String(allianceName || old.alliance_name || ""),
+    room_type: String(roomType || old.room_type || "alliance"),
+    guild_id: String(guildId !== undefined ? guildId : (old.guild_id || "")),
+    guild_name: String(guildName !== undefined ? guildName : (old.guild_name || "")),
+    server_id: String(serverId !== undefined ? serverId : (old.server_id || "")),
     active: active === true,
     last_activity_at: active === true ? new Date().toISOString() : (old.last_activity_at || new Date().toISOString()),
     updated_at: String(new Date())
@@ -333,6 +338,29 @@ function resolveAllianceFromCore_(query, room, sender, packageName, channelId, u
   });
 }
 
+function gcRemoteRoomRegister_(allianceId, channelId, roomType, guildId) {
+  var response = postAlertControl_("room_register", allianceId, {
+    room_id: string_(channelId).trim(),
+    room_type: roomType === "guild" ? "guild" : "alliance",
+    guild_id: roomType === "guild" ? String(guildId || "") : ""
+  });
+  if (!response || response.ok !== true) throw new Error("길드/연합 방 서버 등록 실패: " + String(response && response.error || "서버 응답 없음"));
+  return response.data || {};
+}
+function gcRemoteRoomUnregister_(binding, channelId) {
+  if (!binding || !binding.alliance_id) return;
+  var response = postAlertControl_("room_unregister", String(binding.alliance_id), {room_id:string_(channelId).trim()});
+  if (!response || response.ok !== true) throw new Error("방 서버 연결 해제 실패: " + String(response && response.error || "서버 응답 없음"));
+}
+function gcRoomsForBoss_(rooms, item) {
+  var scope = String(item && item.boss_scope || "WORLD").toUpperCase();
+  var server = String(item && item.server_id || "");
+  return rooms.filter(function(entry) {
+    var b = entry.binding || {};
+    if (scope !== "SERVER") return true;
+    return b.room_type === "guild" && !!server && String(b.server_id || "") === server;
+  });
+}
 function makeWorkerBody_(text, allianceId, room, sender, packageName, channelId, userHash) {
   return {
     key: KAKAO_INPUT_KEY,
@@ -659,8 +687,13 @@ function pollKakaoAlerts_() {
           // Defense in depth: never send 1-minute or spawn alerts, even from legacy queues.
           if (String(alert.alert_type || "") !== "10m" && String(alert.alert_type || "") !== "5m") continue;
           var status = "sent", deliveryId = "alert:" + alertId;
-          for (var r = 0; r < rooms.length; r++) {
-            var entry = rooms[r], msg = String(alert.message || "");
+          var targetRooms = gcRoomsForBoss_(rooms, alert);
+          if (!targetRooms.length) {
+            postAlertControl_("alerts_mark", allianceId, {alert_ids:[alertId], status:"expired", note:"no matching guild/alliance room"});
+            continue;
+          }
+          for (var r = 0; r < targetRooms.length; r++) {
+            var entry = targetRooms[r], msg = String(alert.message || "");
             var receiptKey = alertId + ":" + gcRoomDeliveryId_(entry);
             if (alertReceipts[receiptKey]) {KAKAO_ALERT_SKIPPED_COUNT_++;continue;}
             if (wasAlertDelivered_(entry.room_key, deliveryId)) {
@@ -676,12 +709,12 @@ function pollKakaoAlerts_() {
               KAKAO_ALERT_LAST_ERROR_ = "알림 발송 실패: " + KAKAO_SEND_LAST_DETAIL_;
             }
           }
-          if (status === "sent" && !gcVerifyAllRoomReceipts_(allianceId, "alert", alertId, rooms)) {
+          if (status === "sent" && !gcVerifyAllRoomReceipts_(allianceId, "alert", alertId, targetRooms)) {
             status = "queued";
             KAKAO_ALERT_LAST_ERROR_ = "서버 방별 발송 확인 미완료: " + alertId;
           }
           var ack = postAlertControl_("alerts_mark", allianceId,
-            {alert_ids:[alertId],status:status,room_ids:rooms.map(function(x){return gcRoomDeliveryId_(x);}),note:"MessengerBotR API2 v2.1.5 " + status});
+            {alert_ids:[alertId],status:status,room_ids:targetRooms.map(function(x){return gcRoomDeliveryId_(x);}),note:"MessengerBotR API2 guild routing " + status});
           if (!ack || ack.ok !== true || !ack.data || Number(ack.data.updated || 0) !== 1) throw new Error(ack && ack.error || "alerts_mark 상태 갱신 실패");
         }
       } catch (eAlert) {
@@ -706,8 +739,13 @@ function pollKakaoAlerts_() {
           var item = results[j] || {}, resultId = String(item.result_id || "");
           if (!resultId) continue;
           var resultStatus = "sent", resultDeliveryId = "result:" + resultId;
-          for (var rr = 0; rr < rooms.length; rr++) {
-            var roomEntry = rooms[rr], resultMessage = String(item.message || "");
+          var targetResultRooms = gcRoomsForBoss_(rooms, item);
+          if (!targetResultRooms.length) {
+            postAlertControl_("attendance_results_mark", allianceId, {result_ids:[resultId], status:"expired", note:"no matching guild/alliance room"});
+            continue;
+          }
+          for (var rr = 0; rr < targetResultRooms.length; rr++) {
+            var roomEntry = targetResultRooms[rr], resultMessage = String(item.message || "");
             var resultReceiptKey = resultId + ":" + gcRoomDeliveryId_(roomEntry);
             if (resultReceipts[resultReceiptKey]) {KAKAO_ALERT_SKIPPED_COUNT_++;continue;}
             if (wasAlertDelivered_(roomEntry.room_key, resultDeliveryId)) {
@@ -723,12 +761,12 @@ function pollKakaoAlerts_() {
               KAKAO_ALERT_LAST_ERROR_ = "출석 발송 실패: " + KAKAO_SEND_LAST_DETAIL_;
             }
           }
-          if (resultStatus === "sent" && !gcVerifyAllRoomReceipts_(allianceId, "attendance", resultId, rooms)) {
+          if (resultStatus === "sent" && !gcVerifyAllRoomReceipts_(allianceId, "attendance", resultId, targetResultRooms)) {
             resultStatus = "queued";
             KAKAO_ALERT_LAST_ERROR_ = "서버 방별 출석 발송 확인 미완료: " + resultId;
           }
           var resultAck = postAlertControl_("attendance_results_mark", allianceId,
-            {result_ids:[resultId],status:resultStatus,room_ids:rooms.map(function(x){return gcRoomDeliveryId_(x);}),note:"MessengerBotR API2 v2.1.5 " + resultStatus});
+            {result_ids:[resultId],status:resultStatus,room_ids:targetResultRooms.map(function(x){return gcRoomDeliveryId_(x);}),note:"MessengerBotR API2 guild routing " + resultStatus});
           if (!resultAck || resultAck.ok !== true || !resultAck.data || Number(resultAck.data.updated || 0) !== 1) throw new Error(resultAck && resultAck.error || "attendance_results_mark 상태 갱신 실패");
         }
       } catch (eResult) {
@@ -808,7 +846,8 @@ function kakaoLocalHelpText_() {
     "📌 GuildCore 카톡 명령어",
     "",
     "[연결]",
-    "!핑 [연합명] · !연결상태 · !핑해제 · !연결초기화",
+    "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
+    "!연결상태 · !핑해제 · !연결초기화",
     "!알림점검 · !발송진단 · !방진단 · !연결목록 · !타이머재시작",
     "",
     "[기본/보스]",
@@ -1102,13 +1141,16 @@ function response(
       replier.reply(
         "✅ GuildCore 연결 정상\n" +
         "카카오톡 → MessengerBotR → Worker → V6 D1\n" +
-        "연합: " + (statusBinding.alliance_name || statusBinding.alliance_id)
+        "연합: " + (statusBinding.alliance_name || statusBinding.alliance_id) +
+        (statusBinding.room_type === "guild" ? "\n길드: " + statusBinding.guild_name : "\n연합 공지방")
       );
       return;
     }
 
     /* 잘못 연결된 방 매핑을 완전히 삭제. 판매/재설정 때 사용 */
     if (text === "!연결초기화") {
+      var original = getRoomBinding_(room, channelId);
+      if (original) gcRemoteRoomUnregister_(original, channelId);
       var cleared = clearRoomBinding_(room, channelId);
       if (cleared) {
         replier.reply(
@@ -1126,6 +1168,8 @@ function response(
 
     /* !핑해제 : Worker 호출 없이 방만 비활성화. 마지막 연합은 기억 */
     if (text === "!핑해제") {
+      var current = getRoomBinding_(room, channelId);
+      if (current) gcRemoteRoomUnregister_(current, channelId);
       var disabled = deactivateRoom_(room, channelId);
       if (disabled) {
         replier.reply(
@@ -1186,12 +1230,13 @@ function response(
           );
         }
 
+        gcRemoteRoomRegister_(oldBinding.alliance_id, channelId, oldBinding.room_type || "alliance", oldBinding.guild_id || "");
         var bindingOld = saveRoomBinding_(
           room,
           channelId,
           oldBinding.alliance_id,
           oldBinding.alliance_name,
-          true
+          true, oldBinding.room_type || "alliance", oldBinding.guild_id || "", oldBinding.guild_name || "", oldBinding.server_id || ""
         );
 
         var pingReply = "";
@@ -1203,14 +1248,19 @@ function response(
           (pingReply ? pingReply + "\n" : "") +
           "🔗 이 카톡방 연결 활성화 완료\n" +
           "연합: " + (bindingOld.alliance_name || bindingOld.alliance_id) + "\n" +
+          (bindingOld.room_type === "guild" ? "길드: " + bindingOld.guild_name + "\n" : "연합 공지방\n") +
           "🔔 자동알림: 10분 · 5분 / 출석 최종명단\n" +
           "해제: !핑해제"
         );
         return;
       }
 
+      var parts = requested ? requested.split(/\s+/) : [];
+      if (parts.length > 2) throw new Error("사용법: !핑 연합명 [길드명]");
+      var selectedAlliance = parts[0] || "";
+      var selectedGuild = parts[1] || "";
       var resolved = resolveAllianceFromCore_(
-        requested,
+        selectedAlliance,
         room,
         sender,
         packageName,
@@ -1247,18 +1297,30 @@ function response(
         throw new Error("연합 ID를 확인할 수 없습니다.");
       }
 
+      var guildId = "", serverId = "", guildName = "", roomType = "alliance";
+      if (selectedGuild) {
+        var gr = postAlertControl_("guild_lookup", info.alliance_id, {guild_name:selectedGuild});
+        if (!gr || gr.ok !== true || !gr.data || !gr.data.guild || !gr.data.guild.guild_id)
+          throw new Error("길드 확인 실패: " + String(gr && gr.error || selectedGuild));
+        guildId = String(gr.data.guild.guild_id);
+        serverId = String(gr.data.guild.server_id || "");
+        guildName = String(gr.data.guild.guild_name || selectedGuild);
+        roomType = "guild";
+      }
+      gcRemoteRoomRegister_(info.alliance_id, channelId, roomType, guildId);
+      if (oldBinding && oldBinding.alliance_id && oldBinding.alliance_id !== info.alliance_id) {
+        gcRemoteRoomUnregister_(oldBinding, channelId);
+      }
       var binding = saveRoomBinding_(
-        room,
-        channelId,
-        info.alliance_id,
-        info.alliance_name,
-        true
+        room, channelId, info.alliance_id, info.alliance_name, true,
+        roomType, guildId, guildName, serverId
       );
 
       replier.reply(
         "✅ GuildCore 연결 확인\n" +
         "🔗 이 카톡방 연결 활성화 완료\n" +
         "연합: " + (binding.alliance_name || binding.alliance_id) + "\n" +
+        (binding.room_type === "guild" ? "길드: " + binding.guild_name + "\n" : "연합 공지방\n") +
         "🔔 자동알림: 10분 · 5분 / 출석 최종명단\n" +
         "해제: !핑해제"
       );
