@@ -2145,14 +2145,14 @@ async function botPullAttendanceResults_(env,aid,p){
   const rows=await all(env.DB,`SELECT * FROM attendance_result_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY created_at LIMIT ?`,aid,target==="kakao"?200:limit),results=[];
   const seen=new Set();
   for(const x of rows){
-    const e=target==="kakao"?await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id):null;
+    const eventRow=target==="kakao"?await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id):null;
     if(target==="kakao"){
       const age=Date.now()-Date.parse(String(x.created_at||""));
       const finalSummary=String(x.message||"").startsWith("📋 ") &&
         (String(x.message||"").includes(" 출석 종료") || String(x.message||"").includes(" 참여체크 종료"));
       // Do not replay historic alerts or interim screenshot/start updates.
       // Keep records for audit, but never deliver these Kakao queue entries.
-      if(!Number.isFinite(age)||age>30*60000||!e||e.attendance_status!=="closed"||!finalSummary){
+      if(!Number.isFinite(age)||age>30*60000||!eventRow||eventRow.attendance_status!=="closed"||!finalSummary){
         await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);
         continue;
       }
@@ -2165,9 +2165,9 @@ async function botPullAttendanceResults_(env,aid,p){
       const sent=await first(env.DB,"SELECT result_id FROM attendance_result_queue WHERE alliance_id=? AND event_id=? AND message=? AND kakao_status='sent' LIMIT 1",aid,x.event_id,x.message);
       if(sent){await run(env.DB,"UPDATE attendance_result_queue SET kakao_status='expired' WHERE result_id=? AND kakao_status='queued'",x.result_id);continue;}
     }
+    if(results.length>=limit)break;
     if(target==="kakao"){const claimed=await run(env.DB,"UPDATE attendance_result_queue SET kakao_status=\'sending\' WHERE alliance_id=? AND result_id=? AND kakao_status=\'queued\'",aid,x.result_id);if(Number(claimed?.meta?.changes||0)!==1)continue;await gcKakaoRecordLease_(env,aid,"attendance",x.result_id);}
     const e=await first(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_id=?",aid,x.event_id),links=e?botParseEventDiscordLinks_(e.note):[],fallback=e?await botResolveChannels_(env,aid,"attendance",e.boss_scope||"WORLD",e.server_id||""):[];
-    if(results.length>=limit)break;
     results.push({result_id:x.result_id,event_id:x.event_id,event_type:e?.event_type||"",boss_name:x.boss_name,boss_scope:x.boss_scope||"WORLD",server_id:x.server_id||"",server_name:x.server_name||"",message:x.message||"",discord_message_id:x.discord_message_id||e?.discord_message_id||"",discord_channel_id:x.discord_channel_id||e?.discord_channel_id||"",discord_message_links:links,discord_channel_ids:fallback.join(",")});
   }
   return {target,results};
