@@ -584,6 +584,46 @@ function gcVerifyAllRoomReceipts_(allianceId, type, itemId, rooms) {
   return true;
 }
 
+
+/* Manual Kakao participation reports (boss / weekly / combined).
+ * Reuse the established 30-second poller, but do not touch boss alert queues.
+ * The server routes each report to the exact registered room. A sent receipt
+ * is stored locally before the server ACK to prevent retries from resending.
+ */
+function gcPollManualAttendanceReports_(allianceId, rooms) {
+  for (var i = 0; i < rooms.length; i++) {
+    var entry = rooms[i], roomId = gcRoomDeliveryId_(entry);
+    if (!roomId || !entry.binding || entry.binding.active !== true) continue;
+    var response = postAlertControl_("attendance_reports_pull", allianceId, {
+      room_id:roomId, guild_routing_v1:true
+    });
+    if (!response || response.ok !== true) throw new Error(response && response.error || "attendance_reports_pull 실패");
+    var reports = response.data && response.data.reports || [];
+    for (var j = 0; j < reports.length; j++) {
+      var report = reports[j] || {}, id = String(report.report_id || "");
+      if (!id || String(report.status || "") !== "queued") continue;
+      var deliveryId = "manual-report:" + id;
+      if (!wasAlertDelivered_(entry.room_key, deliveryId)) {
+        if (!proactiveReply_(entry.binding, String(report.message || ""))) {
+          KAKAO_ALERT_UNCERTAIN_COUNT_++;
+          KAKAO_ALERT_LAST_ERROR_ = "참여 보고서 발송 실패: " + KAKAO_SEND_LAST_DETAIL_;
+          continue; // Keep queued for a future retry; never claim a failed send as sent.
+        }
+        markAlertDelivered_(entry.room_key, deliveryId);
+        KAKAO_ALERT_SENT_COUNT_++;
+      } else {
+        KAKAO_ALERT_SKIPPED_COUNT_++;
+      }
+      var ack = postAlertControl_("attendance_reports_mark", allianceId, {
+        report_ids:[id],status:"sent",room_id:roomId
+      });
+      if (!ack || ack.ok !== true || !ack.data || Number(ack.data.updated || 0) !== 1) {
+        throw new Error(ack && ack.error || "attendance_reports_mark 완료 확인 실패: " + id);
+      }
+    }
+  }
+}
+
 function pollKakaoAlerts_() {
   if (KAKAO_COMMAND_BUSY_) return;
   if (KAKAO_ALERT_POLLING_) return;
@@ -719,6 +759,13 @@ function pollKakaoAlerts_() {
         KAKAO_ALERT_LAST_ERROR_ = String(eResult);
         try { Log.e("GuildCore Kakao attendance result poll: " + eResult); } catch (_) {}
       }
+      /* 3) 수동 참여 보고서: 길드방/연합방별로 정확하게 수신 */
+      try {
+        gcPollManualAttendanceReports_(allianceId, rooms);
+      } catch (eReport) {
+        KAKAO_ALERT_LAST_ERROR_ = "참여 보고서 전송 오류: " + String(eReport);
+        try { Log.e("GuildCore Kakao manual report poll: " + eReport); } catch (_) {}
+      }
     }
   } finally {
     KAKAO_ALERT_POLLING_ = false;
@@ -790,7 +837,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
-    "!발송방등록 방이름 → !발송확인"
+    "!발송방등록 방이름 → !발송확인",
     "",
     "[기본/보스]",
     "!등록 길드명 게임닉네임",
