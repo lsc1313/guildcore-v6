@@ -740,11 +740,6 @@ async function getGuildStats(env,guildId,startDate,endDate){
   const g=await guildMeta(env,guildId), start=parseLocalDateTime(`${startDate} 00:00`), end=parseLocalDateTime(`${endDate} 23:59`);if(!start||!end)throw new Error("기간 형식이 올바르지 않습니다.");
   const result=await gcGuildScoreData_(env,g,start.toISOString(),end.toISOString());
   return {...result,ranking:result.ranking.map(m=>({...m,count:m.boss_count,rate:m.rate}))};
-  const events=await all(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_type<>'manual_participation' AND cut_at>=? AND cut_at<=? AND (boss_scope='WORLD' OR server_id=?)",g.alliance_id,start.toISOString(),end.toISOString(),g.server_id||"");
-  if(!events.length)return {total_raids:0,ranking:[]};
-  const ids=events.map(x=>x.event_id); const ph=ids.map(()=>"?").join(",");
-  const rows=await all(env.DB,`SELECT member_id_at_event member_id,game_nickname_at_event nickname,COUNT(*) count FROM boss_attendance WHERE guild_id_at_event=? AND attended=1 AND event_id IN (${ph}) GROUP BY member_id_at_event,game_nickname_at_event`,String(guildId),...ids);
-  const total=events.length;return {total_raids:total,ranking:rows.map(x=>({member_id:x.member_id,nickname:x.nickname||x.member_id,count:Number(x.count||0),rate:total?Math.round(Number(x.count||0)/total*1000)/10:0})).sort((a,b)=>b.count-a.count||String(a.nickname).localeCompare(String(b.nickname)))};
 }
 
 
@@ -1616,7 +1611,7 @@ function gcPointAt_(rules,kind,owner,date){
   for(const r of rules){
     if(r.kind!==kind||r.owner_id!==owner)continue;
     const x=Date.parse(r.effective_at);
-    if(Number.isFinite(x)&&x<=t&&x>dt){last=Number(r.points);dt=x;}
+    if(Number.isFinite(x)&&x<=t&&x>=dt){last=Number(r.points);dt=x;}
   }
   return last;
 }
