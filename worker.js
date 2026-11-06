@@ -1587,6 +1587,51 @@ async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=
   const id=uid("kreport");await run(env.DB,"INSERT INTO kakao_attendance_reports(report_id,alliance_id,start_day,end_day,content_hash,message,status,created_at,requested_by,target_guild_id) VALUES(?,?,?,?,?,?,?,?,?,?)",id,aid,startDay,endDay,String(p.message.length),p.message,"queued",nowIso(),String(ctx.member_id||"admin"),String(guildId||""));
   return {ok:true,duplicate:false,report_id:id,status:"queued",message:"카톡 전송 대기열에 등록했습니다."};
 }
+
+/* Weekly and combined guild participation reports; existing Kakao queue only. */
+async function gcGuildScoreReportBuild_(env,aid,gid,startDay,endDay,token,kind){
+  if(!gid||!["weekly","combined"].includes(String(kind)))throw new Error("길드와 전송 종류를 선택하세요.");
+  const perm=await attendanceContext(env,aid,String(gid),token);
+  if(!perm.can_edit)throw new Error("해당 길드 기록을 전송할 권한이 없습니다.");
+  const g=await guildMeta(env,String(gid));
+  if(String(g.alliance_id)!==String(aid))throw new Error("다른 연합 길드입니다.");
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(startDay)||!/^\d{4}-\d{2}-\d{2}$/.test(endDay))throw new Error("시작일과 종료일을 선택하세요.");
+  const from=parseLocalDateTime(startDay+" 00:00"),to=parseLocalDateTime(endDay+" 23:59");
+  if(!from||!to||to<from||to-from>366*86400000)throw new Error("조회 기간은 최대 366일입니다.");
+  const scores=await gcGuildScoreData_(env,g,from.toISOString(),to.toISOString());
+  const weekly=kind==="weekly",denom=weekly?scores.weekly_total_points:scores.total_points;
+  const ranking=scores.ranking.map(x=>({
+    name:x.nickname,points:weekly?x.weekly_earned:x.earned_points,
+    boss:x.boss_earned,weekly:x.weekly_earned,unknown:x.unknown
+  })).sort((a,b)=>b.points-a.points||a.name.localeCompare(b.name,"ko"));
+  const lines=["📊 [GuildCore] "+g.guild_name+(weekly?" 주간 활동":" 보스·주간 통합")+" 참여점수",
+    "기간: "+startDay+" ~ "+endDay,
+    ...(weekly?[]:["보스: "+scores.total_raids+"회 / "+scores.boss_total_points+"점"]),
+    "주간 활동: "+scores.weekly_activities+"건 / "+scores.weekly_total_points+"점",
+    "개인별 획득 가능 총점: "+denom+"점",
+    "※ 미확인 주간 활동은 점수 미획득으로 표시됩니다.",""];
+  ranking.forEach((m,i)=>lines.push((i+1)+". "+m.name+" — "+m.points+"/"+denom+"점 ("+(denom?Math.round(m.points/denom*1000)/10:0)+"%)"+
+    (weekly?"":" [보스 "+m.boss+" · 주간 "+m.weekly+"]")+(m.unknown?" · 미확인 "+m.unknown+"건":"")));
+  if(!ranking.length)lines.push("활성 길드원이 없습니다.");
+  const message=lines.join("\n");
+  if(message.length>12000)throw new Error("전송 내용이 너무 깁니다. 기간을 줄여주세요.");
+  return {scope:"guild",guild_id:String(gid),start_day:startDay,end_day:endDay,kind,total_points:denom,ranking,message,truncated:false};
+}
+async function previewGuildScoreKakaoReport(env,aid,gid,startDay,endDay,token,kind){
+  return gcGuildScoreReportBuild_(env,aid,gid,startDay,endDay,token,kind);
+}
+async function queueGuildScoreKakaoReport(env,aid,gid,startDay,endDay,token,kind){
+  const p=await gcGuildScoreReportBuild_(env,aid,gid,startDay,endDay,token,kind);
+  await gcAttendanceReportSchema_(env);
+  const bound=await first(env.DB,"SELECT room_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND guild_id=? AND room_type='guild' AND active=1 LIMIT 1",String(aid),String(gid));
+  if(!bound)throw new Error("길드 카톡방 연결이 없습니다. 길드방에서 !핑 연합명 길드명을 실행하세요.");
+  const duplicate=await first(env.DB,"SELECT report_id,status FROM kakao_attendance_reports WHERE alliance_id=? AND start_day=? AND end_day=? AND message=? AND target_guild_id=? AND status IN ('queued','sending','sent') LIMIT 1",String(aid),startDay,endDay,p.message,String(gid));
+  if(duplicate)return {ok:true,duplicate:true,report_id:duplicate.report_id,status:duplicate.status,message:"동일 보고서가 이미 전송되었거나 대기 중입니다."};
+  const ctx=await requireLogin(env,token),id=uid("kreport");
+  await run(env.DB,"INSERT INTO kakao_attendance_reports(report_id,alliance_id,start_day,end_day,content_hash,message,status,created_at,requested_by,target_guild_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+    id,String(aid),startDay,endDay,String(p.message.length),p.message,"queued",nowIso(),String(ctx.member_id||"admin"),String(gid));
+  return {ok:true,duplicate:false,report_id:id,status:"queued",message:"길드 카톡 전송 대기열에 등록했습니다."};
+}
 async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOperate(env,token,aid);await gcAttendanceReportSchema_(env);return await all(env.DB,"SELECT report_id,start_day,end_day,status,created_at,sent_at,error FROM kakao_attendance_reports WHERE alliance_id=? ORDER BY created_at DESC LIMIT 50",aid);}
 
 
@@ -1866,7 +1911,7 @@ async function importWeeklyGuildActivity_(env,guildId,week,text,token){
 const RPC = {
   webAttendanceInfo, webAttendanceToggle,
   webLogin, webWhoAmI, webLogout, issueAllianceLeaderBootstrapPin,
-  getAllianceHomeData, getGuildAppData, getAdminStructure, previewKakaoAttendanceReport, queueKakaoAttendanceReport, listKakaoAttendanceReports, saveLobbyTheme, saveLoginBackground, getMyAttendanceSummary, saveAttendanceWeekRule, listAllianceFaq, saveAllianceFaq, deleteAllianceFaq,
+  getAllianceHomeData, getGuildAppData, getAdminStructure, previewKakaoAttendanceReport, queueKakaoAttendanceReport, previewGuildScoreKakaoReport, queueGuildScoreKakaoReport, listKakaoAttendanceReports, saveLobbyTheme, saveLoginBackground, getMyAttendanceSummary, saveAttendanceWeekRule, listAllianceFaq, saveAllianceFaq, deleteAllianceFaq,
   createAllianceWorkspace, renameAlliance, deactivateAlliance, restoreAlliance, deleteAlliancePermanently,
   createGuildWorkspace, renameGuild, updateGuildServer, deactivateGuild, restoreGuild, deleteGuildPermanently,
   saveAllianceNotice, updateAllianceNotice, deleteAllianceNotice, saveGuildNotice, deleteGuildNotice,
