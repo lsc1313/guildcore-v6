@@ -1590,10 +1590,10 @@ async function gcWeeklySchema_(env){
 }
 function gcWeeklyStart_(value){
   const v=String(value||"").trim();
-  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(v))throw new Error("주차 날짜가 올바르지 않습니다.");
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(v))throw new Error("주차 날짜가 올바르지 않습니다.");
   const d=new Date(v+"T00:00:00+09:00");
   if(Number.isNaN(d.getTime())||new Date(d.getTime()+9*3600000).toISOString().slice(0,10)!==v)throw new Error("존재하지 않는 날짜입니다.");
-  const day=(d.getUTCDay()+6)%7;
+  const day=(new Date(d.getTime()+9*3600000).getUTCDay()+6)%7;
   return new Date(d.getTime()-day*86400000+9*3600000).toISOString().slice(0,10);
 }
 async function gcWeeklyAuth_(env,guildId,token,write){
@@ -1602,7 +1602,7 @@ async function gcWeeklyAuth_(env,guildId,token,write){
   if(write&&!can_edit)throw new Error("길드 운영진 이상만 주간 활동을 수정할 수 있습니다.");
   return {g,ctx,can_edit};
 }
-function gcWeeklyNorm_(s){return String(s||"").trim().replace(/\\s+/g,"").toLowerCase();}
+function gcWeeklyNorm_(s){return String(s||"").trim().replace(/\s+/g,"").toLowerCase();}
 async function getWeeklyGuildActivity_(env,guildId,week,token){
   const auth=await gcWeeklyAuth_(env,guildId,token,false);
   await gcWeeklySchema_(env);
@@ -1617,7 +1617,7 @@ async function getWeeklyGuildActivity_(env,guildId,week,token){
 async function addWeeklyGuildActivity_(env,guildId,name,token){
   const {g}=await gcWeeklyAuth_(env,guildId,token,true);
   const n=String(name||"").trim();
-  if(!n||n.length>40||/[\\r\\n\\t|]/.test(n))throw new Error("활동 이름은 1~40자 한 줄로 입력하세요.");
+  if(!n||n.length>40||/[\r\n\t|]/.test(n))throw new Error("활동 이름은 1~40자 한 줄로 입력하세요.");
   await gcWeeklySchema_(env);
   const types=await all(env.DB,"SELECT * FROM guild_weekly_activity_types WHERE guild_id=? AND active=1",g.guild_id);
   if(types.length>=12)throw new Error("길드별 활동은 최대 12개까지 설정할 수 있습니다.");
@@ -1662,8 +1662,8 @@ async function gcWeeklyParseReport_(env,guildId,week,raw,token){
   if(!data.can_edit)throw new Error("길드 운영진 이상만 주간 자료를 가져올 수 있습니다.");
   const text=String(raw||"");
   if(!text||text.length>100000)throw new Error("붙여넣기 자료가 비었거나 너무 깁니다.");
-  const lines=text.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
-  const tabLines=lines.map(line=>line.split("\\t").map(x=>x.trim()));
+  const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const tabLines=lines.map(line=>line.split("\t").map(x=>x.trim()));
   const headIndex=tabLines.findIndex(parts=>parts.length>=2&&/^(문파원|길드원|닉네임|캐릭터|이름)$/i.test(parts[0]));
   if(headIndex<0)throw new Error("첫 열이 문파원/길드원/닉네임인 탭 구분 표를 붙여넣으세요.");
   const header=tabLines[headIndex],activityMap={},matchedHeaders=[];
