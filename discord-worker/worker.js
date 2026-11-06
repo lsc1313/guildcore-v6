@@ -1501,7 +1501,7 @@ async function handleCommandAsync(interaction, env) {
       const updated=await changeNickname(env,discordGuildId,affected,result.discord_display_name);
       if(!updated.ok)syncFailures.push(affected);
     }
-    return {content:"✅ 게임 아이디 변경 완료\\n길드: "+result.guild_name+"\\n"+result.old_nickname+" → "+result.new_nickname+"\\n기존 출석·웹핀 기록 유지"+(syncFailures.length?"\\n⚠️ Discord 표시 닉네임 자동변경 실패: 권한 또는 역할 순서를 확인하세요.":"")};
+    return {content:"✅ 게임 아이디 변경 완료\n길드: "+result.guild_name+"\n"+result.old_nickname+" → "+result.new_nickname+"\n기존 출석·웹핀 기록 유지"+(syncFailures.length?"\n⚠️ Discord 표시 닉네임 자동변경 실패: 권한 또는 역할 순서를 확인하세요.":"")};
   }
   if (name === "등록") return await beginRegistration(interaction, env);
   if (name === "웹핀") {const r=await apiCall(env,discordGuildId,"web_pin_self",actor);return {content:`🔐 **웹 로그인 PIN: ${r.pin}**\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
