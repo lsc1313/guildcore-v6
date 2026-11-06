@@ -1758,58 +1758,108 @@ async function setWeeklyGuildActivityMember_(env,guildId,activityId,week,memberI
   await run(env.DB,"INSERT INTO guild_weekly_activity_entries(guild_id,activity_id,week_start,member_id,participated,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id,activity_id,week_start,member_id) DO UPDATE SET participated=excluded.participated,updated_at=excluded.updated_at",g.guild_id,String(activityId),monday,String(memberId),status==="yes"?1:0,nowIso());
   return {ok:true};
 }
+function gcWeeklyCellStatus_(value){
+  const v=String(value||"").trim();
+  if(/^(O|○|◯|●|참여|Y|YES|1|✅|✔|✓)$/i.test(v))return "yes";
+  if(/^(X|×|✕|불참|미참여|N|NO|0|❌)$/i.test(v))return "no";
+  if(!v||/^(△|▲|▵|▴|Δ|\?|？|-|—|미확인|확인중|미진행)$/i.test(v))return "unknown";
+  return null;
+}
+function gcWeeklySplitHeader_(line,activities){
+  const raw=String(line||"").trim(),tabs=raw.split("\t").map(x=>x.trim());
+  if(tabs.length>=2)return tabs;
+  // Some mobile browsers replace copied spreadsheet tabs with spaces.
+  // Match configured activity names against the header from left to right.
+  const first=raw.match(/^(문파원|길드원|닉네임|캐릭터|이름)(?:\s+|$)/i);
+  if(!first)return [raw];
+  let tail=raw.slice(first[0].length).trim(),found=["문파원"];
+  const candidates=[...activities.map(a=>a.name),"문파 임무 (완료 횟수)","문파 임무","완료 횟수"];
+  while(tail){
+    const matching=candidates.filter(name=>gcWeeklyNorm_(tail).startsWith(gcWeeklyNorm_(name)))
+      .sort((a,b)=>b.length-a.length);
+    if(!matching.length)return [raw];
+    const selected=matching[0], compact=gcWeeklyNorm_(selected);
+    // Consume words until the compact prefix matches exactly.
+    const words=tail.split(/\s+/),chunk=[];
+    while(words.length&&gcWeeklyNorm_(chunk.join(" "))!==compact){
+      chunk.push(words.shift());
+      if(!compact.startsWith(gcWeeklyNorm_(chunk.join(" "))))return [raw];
+    }
+    if(gcWeeklyNorm_(chunk.join(" "))!==compact)return [raw];
+    found.push(selected);tail=words.join(" ").trim();
+  }
+  return found;
+}
+function gcWeeklySplitData_(line,width){
+  const tab=String(line||"").split("\t").map(x=>x.trim());
+  if(tab.length>=width)return tab;
+  const raw=String(line||"").trim();
+  // Each activity result is one token. Mission counts are also one token.
+  const tokens=raw.split(/\s+/).filter(Boolean);
+  if(tokens.length<width)return tab;
+  // Use right-hand cells; nicknames at the left may contain spaces.
+  const n=width-1;
+  return [tokens.slice(0,tokens.length-n).join(" "),...tokens.slice(-n)];
+}
 async function gcWeeklyParseReport_(env,guildId,week,raw,token){
   const data=await getWeeklyGuildActivity_(env,guildId,week,token);
   if(!data.can_edit)throw new Error("길드 운영진 이상만 주간 자료를 가져올 수 있습니다.");
   const text=String(raw||"");
   if(!text||text.length>100000)throw new Error("붙여넣기 자료가 비었거나 너무 깁니다.");
   const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-  const tabLines=lines.map(line=>line.split("\t").map(x=>x.trim()));
-  const headIndex=tabLines.findIndex(parts=>parts.length>=2&&/^(문파원|길드원|닉네임|캐릭터|이름)$/i.test(parts[0]));
-  if(headIndex<0)throw new Error("첫 열이 문파원/길드원/닉네임인 탭 구분 표를 붙여넣으세요.");
-  const header=tabLines[headIndex],activityMap={},matchedHeaders=[];
+  const headIndex=lines.findIndex(line=>/^(문파원|길드원|닉네임|캐릭터|이름)(?:\s|$)/i.test(line));
+  if(headIndex<0)throw new Error("첫 줄에 문파원/길드원/닉네임과 활동 이름이 있어야 합니다. 표 제목부터 복사해주세요.");
+  const header=gcWeeklySplitHeader_(lines[headIndex],data.activities);
+  if(header.length<2)throw new Error("활동 열을 인식하지 못했습니다. 게임 표의 제목 행부터 그대로 붙여넣으세요.");
+  const activityMap={},matchedHeaders=[];
   for(let i=1;i<header.length;i++){
     const type=data.activities.find(a=>gcWeeklyNorm_(a.name)===gcWeeklyNorm_(header[i]));
-    if(type){if(activityMap[type.activity_id]!==undefined)throw new Error("같은 활동 열이 중복되었습니다.");activityMap[type.activity_id]=i;matchedHeaders.push(type);}
+    if(type){
+      if(activityMap[type.activity_id]!==undefined)throw new Error("같은 활동 열이 중복되었습니다.");
+      activityMap[type.activity_id]=i;matchedHeaders.push(type);
+    }
   }
-  if(!matchedHeaders.length)throw new Error("등록된 활동 이름과 일치하는 열이 없습니다. 먼저 활동을 설정하세요.");
+  if(!matchedHeaders.length)throw new Error("등록한 활동과 같은 이름의 열이 없습니다. 활동 이름을 확인하세요.");
   const memberMap=new Map(data.members.map(m=>[gcWeeklyNorm_(m.nickname),m]));
-  const unknown=[],duplicates=[],rows=[],seen=new Set(),badCells=[];
-  for(const parts of tabLines.slice(headIndex+1)){
-    const nickname=String(parts[0]||"").trim();
+  const unknown=[],duplicates=[],rows=[],seen=new Set(),badCells=[],ignoredCells=[];
+  let unknownStatuses=0,skippedRows=0;
+  for(const line of lines.slice(headIndex+1)){
+    const parts=gcWeeklySplitData_(line,header.length),nickname=String(parts[0]||"").trim();
     if(!nickname||/^(참여율|합계|전체|총계)$/i.test(nickname))continue;
+    if(parts.length<header.length){badCells.push(nickname+" (열 수 부족)");continue;}
     const member=memberMap.get(gcWeeklyNorm_(nickname));
-    if(!member){unknown.push(nickname);continue;}
+    if(!member){unknown.push(nickname);skippedRows++;continue;}
     if(seen.has(member.member_id)){duplicates.push(nickname);continue;}
     seen.add(member.member_id);
     const statuses={};
     for(const type of matchedHeaders){
       const value=String(parts[activityMap[type.activity_id]]||"").trim();
       if(!data.held[type.activity_id])continue;
-      if(/^(O|○|◯|참여|Y|YES|1|✅|✔|✓)$/i.test(value))statuses[type.activity_id]="yes";
-      else if(/^(X|×|✕|불참|미참여|N|NO|0|❌)$/i.test(value))statuses[type.activity_id]="no";
-      else if(value&&value!=="-"&&value!=="—")badCells.push(nickname+" / "+type.name+": "+value);
+      const parsed=gcWeeklyCellStatus_(value);
+      if(parsed==="yes"||parsed==="no")statuses[type.activity_id]=parsed;
+      else if(parsed==="unknown"){unknownStatuses++;ignoredCells.push(nickname+" / "+type.name);}
+      else badCells.push(nickname+" / "+type.name+": "+value);
     }
     rows.push({member_id:member.member_id,nickname,statuses});
   }
   const count=rows.reduce((n,r)=>n+Object.keys(r.statuses).length,0);
-  return {week_start:data.week_start,activity_columns:matchedHeaders.map(a=>({activity_id:a.activity_id,name:a.name,held:!!data.held[a.activity_id]})),matched_members:rows.length,total_cells:count,unknown_names:unknown,duplicate_names:duplicates,invalid_cells:badCells,rows};
+  return {week_start:data.week_start,activity_columns:matchedHeaders.map(a=>({activity_id:a.activity_id,name:a.name,held:!!data.held[a.activity_id]})),matched_members:rows.length,total_cells:count,unknown_names:unknown,duplicate_names:duplicates,invalid_cells:badCells,unknown_status_count:unknownStatuses,ignored_count:ignoredCells.length,skipped_rows:skippedRows,rows};
 }
 async function previewWeeklyGuildActivityImport_(env,guildId,week,text,token){
   const p=await gcWeeklyParseReport_(env,guildId,week,text,token);
-  return {week_start:p.week_start,activity_columns:p.activity_columns,matched_members:p.matched_members,total_cells:p.total_cells,unknown_names:p.unknown_names,duplicate_names:p.duplicate_names,invalid_cells:p.invalid_cells};
+  return {week_start:p.week_start,activity_columns:p.activity_columns,matched_members:p.matched_members,total_cells:p.total_cells,unknown_names:p.unknown_names,duplicate_names:p.duplicate_names,invalid_cells:p.invalid_cells,unknown_status_count:p.unknown_status_count,skipped_rows:p.skipped_rows};
 }
 async function importWeeklyGuildActivity_(env,guildId,week,text,token){
   const p=await gcWeeklyParseReport_(env,guildId,week,text,token);
-  if(p.unknown_names.length||p.duplicate_names.length||p.invalid_cells.length)throw new Error("미등록/중복 닉네임 또는 해석 불가 셀이 있습니다. 미리보기에서 확인한 뒤 수정하세요.");
-  if(!p.total_cells)throw new Error("진행 완료로 표시된 활동의 O/X 기록이 없습니다.");
-  const now=nowIso();
-  const ops=[];
+  // Only exact O/X results for identified members. Never guess nickname matches.
+  if(p.duplicate_names.length||p.invalid_cells.length)throw new Error("중복 닉네임 또는 해석할 수 없는 셀이 있습니다. 미리보기에서 확인하세요.");
+  if(!p.total_cells)throw new Error("진행으로 설정된 활동에서 반영할 O/X 기록이 없습니다. △는 미확인으로 유지합니다.");
+  const now=nowIso(),ops=[];
   for(const row of p.rows)for(const [activityId,status] of Object.entries(row.statuses)){
     ops.push(env.DB.prepare("INSERT INTO guild_weekly_activity_entries(guild_id,activity_id,week_start,member_id,participated,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id,activity_id,week_start,member_id) DO UPDATE SET participated=excluded.participated,updated_at=excluded.updated_at").bind(String(guildId),activityId,p.week_start,row.member_id,status==="yes"?1:0,now));
   }
   for(let i=0;i<ops.length;i+=75)await env.DB.batch(ops.slice(i,i+75));
-  return {ok:true,week_start:p.week_start,matched_members:p.matched_members,updated_cells:p.total_cells};
+  return {ok:true,week_start:p.week_start,matched_members:p.matched_members,updated_cells:p.total_cells,skipped_names:p.unknown_names,unknown_status_count:p.unknown_status_count};
 }
 
 const RPC = {
