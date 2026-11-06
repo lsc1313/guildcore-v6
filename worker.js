@@ -1799,6 +1799,36 @@ async function botRequireBossAttendanceOperate_(env,aid,p,scope,serverId){const 
 async function botRequireBossConfigScope_(env,aid,p,scope,serverId){const a=await botActor_(env,aid,p);const sc=String(scope||"WORLD").toUpperCase()==="SERVER"?"SERVER":"WORLD",sid=String(serverId||"");if(a.alliance_level>=70)return a;if(sc==="SERVER"&&a.guild_level>=20&&String(a.server_id||"")===sid)return a;if(sc==="WORLD")throw new Error("월드보스 설정은 연합장/연합운영진만 가능합니다.");throw new Error("자기 서버의 길드장/부길드장/길드운영진만 서버보스를 설정할 수 있습니다.");}
 async function botRequireAllianceOperate_(env,aid,p){const a=await botActor_(env,aid,p);if(a.alliance_level>=70)return a;throw new Error("연합운영진 이상 권한이 필요합니다.");}
 async function botRequireGuildOperate_(env,aid,p){const a=await botActor_(env,aid,p);if(a.guild_level>=20)return a;throw new Error("길드 운영진 이상 권한이 필요합니다.");}
+async function botChangeGameNickname_(env,aid,p){
+  const guildKey=String(p.guild_key||"").trim(),oldNick=String(p.old_nickname||"").trim(),newNick=String(p.new_nickname||"").trim();
+  if(!guildKey||!oldNick||!newNick)throw new Error("사용법: 변경 길드명 기존아이디 변경아이디");
+  if(oldNick===newNick)throw new Error("기존 아이디와 변경 아이디가 같습니다.");
+  if(newNick.length>24||oldNick.length>24||/[\\r\\n\\t]/.test(newNick)||/[\\r\\n\\t]/.test(oldNick))throw new Error("게임 아이디는 24자 이내의 한 줄로 입력하세요.");
+  const guilds=await activeGuilds(env,aid),q=guildKey.toLowerCase();
+  const g=guilds.find(x=>String(x.guild_id).toLowerCase()===q||String(x.guild_name).trim().toLowerCase()===q);
+  if(!g)throw new Error("해당 연합에서 길드를 찾을 수 없습니다: "+guildKey);
+  const actor=await botActor_(env,aid,p);
+  const target=await first(env.DB,"SELECT * FROM members WHERE guild_id=? AND nickname=? AND status='활성'",g.guild_id,oldNick);
+  if(!target)throw new Error("기존 게임 아이디를 찾을 수 없습니다: "+oldNick);
+  const own=String(actor.member_id)===String(target.member_id);
+  if(!own&&!(actor.alliance_level>=70||(actor.guild_id===g.guild_id&&actor.guild_level>=20)))throw new Error("본인 또는 해당 길드 운영진 이상만 변경할 수 있습니다.");
+  if(actor.kind==="kakao"&&own){
+    const sender=String(p.sender||p.kakao_sender||"").trim();
+    const registeredSender=String(actor.identity?.kakao_sender||"").trim();
+    if(sender&&registeredSender&&sender!==registeredSender)throw new Error("카카오 등록 발신자 정보가 다릅니다. 운영진에게 확인을 요청하세요.");
+  }
+  const collision=await first(env.DB,"SELECT member_id FROM members WHERE guild_id=? AND nickname=? AND status='활성'",g.guild_id,newNick);
+  if(collision)throw new Error("같은 길드에 이미 등록된 게임 아이디입니다: "+newNick);
+  const now=nowIso(),mid=String(target.member_id),display=botDiscordDisplay_(g,newNick);
+  const outcome=await env.DB.batch([
+    env.DB.prepare("UPDATE members SET nickname=? WHERE member_id=? AND guild_id=? AND nickname=? AND status='활성' AND NOT EXISTS(SELECT 1 FROM members WHERE guild_id=? AND nickname=? AND status='활성')").bind(newNick,mid,g.guild_id,oldNick,g.guild_id,newNick),
+    env.DB.prepare("UPDATE kakao_members SET game_nickname=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=?").bind(newNick,now,aid,mid,g.guild_id),
+    env.DB.prepare("UPDATE discord_members SET game_nickname=?,discord_display_name=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=?").bind(newNick,display,now,aid,mid,g.guild_id)
+  ]);
+  if(Number(outcome?.[0]?.meta?.changes||0)!==1)throw new Error("아이디 변경 중 충돌이 발생했습니다. 현재 등록 상태를 다시 확인하세요.");
+  const discordRows=await all(env.DB,"SELECT discord_user_id FROM discord_members WHERE alliance_id=? AND current_member_id=? AND current_guild_id=? AND status='active'",aid,mid,g.guild_id);
+  return {ok:true,guild_id:g.guild_id,guild_name:g.guild_name,member_id:mid,old_nickname:oldNick,new_nickname:newNick,discord_display_name:display,discord_user_ids:discordRows.map(x=>String(x.discord_user_id||"")).filter(Boolean),history_preserved:true};
+}
 async function botWebPinSelf_(env,aid,p){
   const a=await botActor_(env,aid,p);
   const r=await issueMemberSelfWebPin_(env,a.member_id,a.kind==="kakao"?"kakao":"discord");
@@ -2210,7 +2240,7 @@ function botBossNextLabel_(b){
   }
   return next.slice(-5);
 }
-function botKakaoHelp_(){return ["📌 GuildCore 카톡 명령어","","[연결/동기화]","!초기설정 [연합명] · !서버연결 [연합명]","!동기화 · !서버연결해제 · !핑 [연합명]","","[기본/보스]","!등록 길드명 게임닉네임","!웹핀 · 웹 로그인 10분/1회용 PIN","!보스 / !보스확인 / !보탐","!컷 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!젠 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!내출석 [YYYY-MM]","!보탐대조 [보스명] · Discord/UI 스샷 분석 결과 조회","","[출석 운영]","!참여체크생성 제목","출석은 !컷 후 생성되는 웹 링크에서 참여","!출석종료 보스명|참여체크 제목","!참여삭제 보스명 닉네임","","[알림방 설정 · 연합운영진+]","!보스알림채널설정 [전체|월드|서버명]","!출석채널설정 [전체|월드|서버명]","!보스알림테스트 [전체|월드|서버명]","","[보스 설정]","월드: 연합장/연합운영진 · 서버: 해당 서버 길드장/부길드장/길드운영진","!보스등록 월드|서버명 보스명 쿨|고정|주간 값","!보스수정 보스명 쿨|고정|주간 값","!보스제거 보스명","","[공지/길드]","!연합공지 제목 | 내용","!길드공지 제목 | 내용","!공지확인 연합|길드","!길드원확인 · !길드원추가 닉네임 [직급]","","[아이템/자금/통계]","!아이템내역 · !아이템등록 이름 [수량]","!아이템판매 이름 금액","!길드비용현황 · !길드비용 수입|지출 금액 [메모]","!참여통계 [시작] [종료] · !정산조회 [시작] [종료]","","추가: !연결상태 · !연결초기화 · !핑해제","Web UI · Discord · Kakao는 같은 GuildCore D1 데이터를 사용합니다.","!도움 / !명령어"].join("\n");}
+function botKakaoHelp_(){return ["📌 GuildCore 카톡 명령어","","[연결/동기화]","!초기설정 [연합명] · !서버연결 [연합명]","!동기화 · !서버연결해제 · !핑 [연합명]","","[기본/보스]","!등록 길드명 게임닉네임","!변경 길드명 기존아이디 변경아이디","!웹핀 · 웹 로그인 10분/1회용 PIN","!보스 / !보스확인 / !보탐","!컷 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!젠 보스명 [HH:MM|HHMM] · 등록 길드원 모두","!내출석 [YYYY-MM]","!보탐대조 [보스명] · Discord/UI 스샷 분석 결과 조회","","[출석 운영]","!참여체크생성 제목","출석은 !컷 후 생성되는 웹 링크에서 참여","!출석종료 보스명|참여체크 제목","!참여삭제 보스명 닉네임","","[알림방 설정 · 연합운영진+]","!보스알림채널설정 [전체|월드|서버명]","!출석채널설정 [전체|월드|서버명]","!보스알림테스트 [전체|월드|서버명]","","[보스 설정]","월드: 연합장/연합운영진 · 서버: 해당 서버 길드장/부길드장/길드운영진","!보스등록 월드|서버명 보스명 쿨|고정|주간 값","!보스수정 보스명 쿨|고정|주간 값","!보스제거 보스명","","[공지/길드]","!연합공지 제목 | 내용","!길드공지 제목 | 내용","!공지확인 연합|길드","!길드원확인 · !길드원추가 닉네임 [직급]","","[아이템/자금/통계]","!아이템내역 · !아이템등록 이름 [수량]","!아이템판매 이름 금액","!길드비용현황 · !길드비용 수입|지출 금액 [메모]","!참여통계 [시작] [종료] · !정산조회 [시작] [종료]","","추가: !연결상태 · !연결초기화 · !핑해제","Web UI · Discord · Kakao는 같은 GuildCore D1 데이터를 사용합니다.","!도움 / !명령어"].join("\n");}
 async function botKakaoCommand_(env,aid,p){
   const text=String(p.text||"").trim(),key=String(p.kakao_user_key||"").trim();if(!text.startsWith("!"))return {reply:""};const tokens=text.slice(1).trim().split(/\s+/).filter(Boolean),cmd=String(tokens.shift()||""),args=tokens;
   if(cmd==="핑")return {reply:`✅ GuildCore ${APP_VERSION} 정상 연결\n카톡 → Worker → D1\n${aid}`};
@@ -2218,6 +2248,7 @@ async function botKakaoCommand_(env,aid,p){
   if(cmd==="관리권한확인"){const a=await botRequireAllianceOperate_(env,aid,{...p,kakao_user_key:key});return {reply:"",authorized:true,role:a.alliance_role||a.guild_role||""};}
   if(cmd==="동기화"){await botRequireAllianceOperate_(env,aid,{...p,kakao_user_key:key});const cfg=await botConfig_(env,aid),bosses=await botBosses_(env,aid,{kakao_user_key:key});return {reply:`✅ GuildCore 실시간 동기화 확인\n버전: ${APP_VERSION}\n서버 ${(cfg.servers||[]).length}개 · 길드 ${(cfg.guilds||[]).length}개 · 보스 ${bosses.length}개\nWeb UI · Discord · Kakao가 같은 D1 데이터를 사용 중입니다.`};}
   if(cmd==="등록"){if(args.length<2)throw new Error("사용법: !등록 길드명 게임닉네임");const guild=args.shift(),nick=args.join(" "),r=await botRegisterKakaoMember_(env,aid,{...p,guild_key:guild,game_nickname:nick});return {reply:`✅ 등록 완료\n길드: ${r.guild_name}\n닉네임: ${r.game_nickname}`};}
+  if(cmd==="변경"){if(args.length!==3)throw new Error("사용법: !변경 길드명 기존아이디 변경아이디");const r=await botChangeGameNickname_(env,aid,{...p,kakao_user_key:key,guild_key:args[0],old_nickname:args[1],new_nickname:args[2]});return {reply:"✅ 게임 아이디 변경 완료\\n길드: "+r.guild_name+"\\n"+r.old_nickname+" → "+r.new_nickname+"\\n기존 출석·웹핀 기록 유지"};}
   if(cmd==="웹핀"){const r=await botWebPinSelf_(env,aid,{...p,kakao_user_key:key});return {reply:`🔐 웹 로그인 PIN: ${r.pin}\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
   if(cmd==="보스"||cmd==="보스확인"||cmd==="보탐"){const list=await botBosses_(env,aid,{kakao_user_key:key});if(!list.length)return {reply:"등록된 활성 보스가 없습니다."};const groups={};for(const b of list){const k=b.boss_scope==="WORLD"?"월드":b.server_name;(groups[k]||(groups[k]=[])).push(b);}const out=[];const keys=Object.keys(groups).sort((a,b)=>a==="월드"?1:(b==="월드"?-1:a.localeCompare(b,"ko",{numeric:true})));for(const k of keys){out.push(`[${k}]`);const rows=groups[k].sort((a,b)=>{const av=String(a.next_spawn_at||"9999-12-31 23:59"),bv=String(b.next_spawn_at||"9999-12-31 23:59");const c=av.localeCompare(bv);return c||String(a.boss_name||"").localeCompare(String(b.boss_name||""),"ko");});for(const b of rows)out.push(`${b.boss_name} · 컷 ${b.last_kill_at?b.last_kill_at.slice(-5):"-"} · 예정 ${botBossNextLabel_(b)}`);}return {reply:out.join("\n")};}
   if(cmd==="컷"){if(!args.length)throw new Error("사용법: !컷 보스명 [HH:MM|HHMM]");let cutAt="",lastCut=String(args[args.length-1]||"");if(args.length>1&&(/^\d{4}$/.test(lastCut)||/^\d{2}:\d{2}$/.test(lastCut))){if(!isClockInput_(lastCut))throw new Error("컷 시각은 HH:MM 또는 HHMM 형식으로 입력하세요.");cutAt=args.pop();}const boss=args.join(" ").trim();if(!boss)throw new Error("보스명을 입력하세요.");const r=await botBossCut_(env,aid,{kakao_user_key:key,boss,cut_at:cutAt});let s=`${r.boss_name}\n컷 ${r.cut_at.slice(-5)}\n예정 ${r.next_spawn_at.slice(-5)}`;if(r.event_id)s+=`\n\n🔗 출석체크: ${webAttendanceUrl_(env.PUBLIC_WEB_URL||"https://guildcore-v6.lsc1313.workers.dev",r.event_id)}`;return {reply:s,event_id:r.event_id||"",sync_attendance:!!r.event_id};}
@@ -2278,6 +2309,7 @@ async function handleBotApi(request,env){
       case "discord_channel_set":data=await botSetDiscordChannel_(env,aid,p,discordServerId);break;
       case "attendance_channel_resolve":data=await botAttendanceChannelResolve_(env,aid,p);break;
       case "register_member":data=await botRegisterDiscordMember_(env,aid,p);break;
+      case "change_nickname":data=await botChangeGameNickname_(env,aid,p);break;
       case "web_pin_self":data=await botWebPinSelf_(env,aid,p);break;
       case "bosses":data=await botBosses_(env,aid,p);break;
       case "boss_add":data=await botBossAdd_(env,aid,p);break;
