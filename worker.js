@@ -1803,7 +1803,7 @@ async function botChangeGameNickname_(env,aid,p){
   const guildKey=String(p.guild_key||"").trim(),oldNick=String(p.old_nickname||"").trim(),newNick=String(p.new_nickname||"").trim();
   if(!guildKey||!oldNick||!newNick)throw new Error("사용법: 변경 길드명 기존아이디 변경아이디");
   if(oldNick===newNick)throw new Error("기존 아이디와 변경 아이디가 같습니다.");
-  if(newNick.length>24||oldNick.length>24||/[\\r\\n\\t]/.test(newNick)||/[\\r\\n\\t]/.test(oldNick))throw new Error("게임 아이디는 24자 이내의 한 줄로 입력하세요.");
+  if(newNick.length>24||oldNick.length>24||/[\r\n\t]/.test(newNick)||/[\r\n\t]/.test(oldNick))throw new Error("게임 아이디는 24자 이내의 한 줄로 입력하세요.");
   const guilds=await activeGuilds(env,aid),q=guildKey.toLowerCase();
   const g=guilds.find(x=>String(x.guild_id).toLowerCase()===q||String(x.guild_name).trim().toLowerCase()===q);
   if(!g)throw new Error("해당 연합에서 길드를 찾을 수 없습니다: "+guildKey);
@@ -1822,8 +1822,8 @@ async function botChangeGameNickname_(env,aid,p){
   const now=nowIso(),mid=String(target.member_id),display=botDiscordDisplay_(g,newNick);
   const outcome=await env.DB.batch([
     env.DB.prepare("UPDATE members SET nickname=? WHERE member_id=? AND guild_id=? AND nickname=? AND status='활성' AND NOT EXISTS(SELECT 1 FROM members WHERE guild_id=? AND nickname=? AND status='활성')").bind(newNick,mid,g.guild_id,oldNick,g.guild_id,newNick),
-    env.DB.prepare("UPDATE kakao_members SET game_nickname=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=?").bind(newNick,now,aid,mid,g.guild_id),
-    env.DB.prepare("UPDATE discord_members SET game_nickname=?,discord_display_name=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=?").bind(newNick,display,now,aid,mid,g.guild_id)
+    env.DB.prepare("UPDATE kakao_members SET game_nickname=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=? AND EXISTS(SELECT 1 FROM members WHERE member_id=? AND guild_id=? AND nickname=?)").bind(newNick,now,aid,mid,g.guild_id,mid,g.guild_id,newNick),
+    env.DB.prepare("UPDATE discord_members SET game_nickname=?,discord_display_name=?,updated_at=? WHERE alliance_id=? AND current_member_id=? AND current_guild_id=? AND EXISTS(SELECT 1 FROM members WHERE member_id=? AND guild_id=? AND nickname=?)").bind(newNick,display,now,aid,mid,g.guild_id,mid,g.guild_id,newNick)
   ]);
   if(Number(outcome?.[0]?.meta?.changes||0)!==1)throw new Error("아이디 변경 중 충돌이 발생했습니다. 현재 등록 상태를 다시 확인하세요.");
   const discordRows=await all(env.DB,"SELECT discord_user_id FROM discord_members WHERE alliance_id=? AND current_member_id=? AND current_guild_id=? AND status='active'",aid,mid,g.guild_id);
