@@ -183,7 +183,11 @@ function saveRoomBinding_(room, channelId, allianceId, allianceName, active, roo
   var old = bindings[key] || {};
 
   bindings[key] = {
-    room_name: String(old.room_name || ""), // 검증된 발송 세션 별칭 보존. 발신자 이름으로 자동 덮어쓰지 않음
+    room_name: String(old.room_name || ""), // confirmed alias preserved across !핑 reconnect
+    send_alias_source: String(old.send_alias_source || ""),
+    send_alias_verified_at: String(old.send_alias_verified_at || ""),
+    pending_send_alias: String(old.pending_send_alias || ""),
+    pending_send_alias_at: String(old.pending_send_alias_at || ""),
     channel_id: string_(channelId) || String(old.channel_id || ""),
     alliance_id: String(allianceId || old.alliance_id || ""),
     alliance_name: String(allianceName || old.alliance_name || ""),
@@ -837,7 +841,7 @@ function kakaoLocalHelpText_() {
     "[연결]",
     "!핑 연합명 (연합방) · !핑 연합명 길드명 (길드방)",
     "!연결상태 · !핑해제 · !연결초기화",
-    "!발송방등록 방이름 → !발송확인",
+    "!발송방등록 (최초 등록자 아이디로 시험) → !발송확인",
     "",
     "[기본/보스]",
     "!등록 길드명 게임닉네임",
@@ -922,7 +926,7 @@ function response(
     /* Open-chat API2 may report msg.room as a sender nickname.
        Never persist it automatically. The operator must name the destination
        explicitly and only a successful send verifies the session. */
-    if (text.indexOf("!발송방등록 ") === 0) {
+    if (text === "!발송방등록" || text.indexOf("!발송방등록 ") === 0) {
       var registered = getRoomBinding_(room, channelId);
       if (!registered || registered.active !== true) {
         replier.reply("❌ 먼저 !핑 연합명 [길드명] 으로 연결해주세요.");
@@ -932,13 +936,17 @@ function response(
         replier.reply("❌ 1:1 대화방은 자동알림 대상으로 등록하지 않습니다.");
         return;
       }
-      var alias = text.substring("!발송방등록 ".length).trim();
+      // Open-chat API2 may return the first registrant's nickname rather than
+      // the group title. A bare command tests that nickname; confirmation is
+      // required from the exact group channel before enabling auto-delivery.
+      var autoAlias = text === "!발송방등록";
+      var alias = autoAlias ? String(sender || "").trim() : text.substring("!발송방등록 ".length).trim();
       if (!alias || alias.length > 100) {
-        replier.reply("사용법: !발송방등록 카톡방의정확한이름");
+        replier.reply("사용법: !발송방등록 (최초 등록자 아이디) 또는 !발송방등록 별칭");
         return;
       }
-      if (alias === String(sender || "").trim() || alias === String(room || "").trim()) {
-        replier.reply("❌ 발신자 이름을 발송방으로 등록할 수 없습니다. 상단의 정확한 단체방 이름을 입력하세요.");
+      if (!autoAlias && alias === String(room || "").trim() && alias !== String(sender || "").trim()) {
+        replier.reply("❌ API2에서 자동 인식한 방이름은 검증되지 않았습니다. 등록자 아이디로 다시 시험해주세요.");
         return;
       }
       var binds = loadRoomBindings_();
@@ -964,7 +972,7 @@ function response(
         binds[keyAlias].pending_send_alias = alias;
         binds[keyAlias].pending_send_alias_at = new Date().toISOString();
         if (!saveRoomBindings_(binds)) throw new Error("시험 발송 이름 저장 실패");
-        replier.reply("🔎 시험 메시지가 이 단체방에 도착했으면 5분 안에 !발송확인 을 입력하세요.\n확인 전에는 자동알림이 발송되지 않습니다.");
+        replier.reply("🔎 등록자 아이디/별칭 ["+alias+"] 발송 시험 완료. 이 단체방에 시험 메시지가 도착했을 때만 5분 안에 !발송확인 을 입력하세요.\n다른 방에 도착했다면 확인하지 마세요.");
       } catch (aliasError) {
         replier.reply("❌ 발송방 등록 실패: " + String(aliasError));
       }
