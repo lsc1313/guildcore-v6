@@ -83,6 +83,7 @@ function commands() {
     { name:"출석채널설정", type:1, description:"현재 채널을 보스 컷/출석 채널로 설정합니다.", options:[{name:"범위",description:"전체/월드/특정 서버",type:3,required:false,choices:scopeChoices},{name:"서버",description:"범위가 서버일 때 선택",type:3,required:false,autocomplete:true}] },
     { name:"보스알림테스트", type:1, description:"설정된 보스알림 채널로 테스트 메시지를 보냅니다.", options:[{name:"범위",description:"전체/월드/특정 서버",type:3,required:false,choices:scopeChoices},{name:"서버",description:"범위가 서버일 때 선택",type:3,required:false,autocomplete:true}] },
     { name:"등록", type:1, description:"길드를 선택하고 게임 닉네임을 등록하거나 다시 등록합니다." },
+    { name:"변경", type:1, description:"기존 회원 기록을 유지하며 게임 아이디를 변경합니다.", options:[{name:"길드",description:"현재 소속 길드",type:3,required:true},{name:"기존아이디",description:"변경 전 게임 아이디",type:3,required:true},{name:"변경아이디",description:"변경할 게임 아이디",type:3,required:true}] },
     { name:"웹핀", type:1, description:"웹 로그인용 10분·1회용 셀프 PIN을 발급합니다." },
     { name:"보스확인", type:1, description:"월드보스와 내 서버 보스의 컷/예정 시간을 확인합니다." },
     { name:"컷", type:1, description:"보스 컷을 등록합니다. 시각 생략 시 지금 컷입니다.", options:[{name:"보스",description:"컷한 보스",type:3,required:true,autocomplete:true},{name:"시각",description:"지난 컷이면 HH:MM 또는 HHMM",type:3,required:false}] },
@@ -1142,7 +1143,7 @@ function discordHelpContent() {
     "📌 **GuildCore Discord 명령어**",
     "",
     "**기본/보스**",
-    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석` · `/보탐대조`",
+    "`/등록` → 길드 선택 → 게임 닉네임 입력 · `/변경` → 기존 게임 아이디 변경 · `/웹핀` → 웹 로그인 PIN 셀프 발급 · `/보스확인` · `/컷` · `/젠` · `/내출석` · `/보탐대조`",
     "`/컷`, `/젠`은 등록된 길드원 모두 사용 가능 · 시각은 `00:00` 또는 `0000` 형식",
     "`/출석종료` · `/참여삭제`",
     "",
@@ -1487,6 +1488,20 @@ async function handleCommandAsync(interaction, env) {
     const msg=await sendChannelMessage(env,target,attendancePayload(list));
     if(msg?.id)await apiCall(env,discordGuildId,"attendance_message_link",{event_id:created.event_id,message_id:msg.id,channel_id:target});
     return {content:`✅ **${title}** 참여체크를 <#${target}> 에 생성했습니다.`};
+  }
+  if (name === "변경") {
+    const result=await apiCall(env,discordGuildId,"change_nickname",{
+      discord_user_id:userId,
+      guild_key:String(getOption(interaction,"길드")||""),
+      old_nickname:String(getOption(interaction,"기존아이디")||""),
+      new_nickname:String(getOption(interaction,"변경아이디")||"")
+    });
+    var syncFailures=[];
+    for(const affected of result.discord_user_ids||[]){
+      const updated=await changeNickname(env,discordGuildId,affected,result.discord_display_name);
+      if(!updated.ok)syncFailures.push(affected);
+    }
+    return {content:"✅ 게임 아이디 변경 완료\\n길드: "+result.guild_name+"\\n"+result.old_nickname+" → "+result.new_nickname+"\\n기존 출석·웹핀 기록 유지"+(syncFailures.length?"\\n⚠️ Discord 표시 닉네임 자동변경 실패: 권한 또는 역할 순서를 확인하세요.":"")};
   }
   if (name === "등록") return await beginRegistration(interaction, env);
   if (name === "웹핀") {const r=await apiCall(env,discordGuildId,"web_pin_self",actor);return {content:`🔐 **웹 로그인 PIN: ${r.pin}**\n유효시간 10분 · 1회용\n사용 후 즉시 폐기됩니다.`};}
