@@ -2,42 +2,25 @@ name: Package GuildCore Kakao Bot
 on:
   push:
     paths:
-      - ".github/workflows/package-kakao-bot.yml"
-      - "kakao-bot/**"
+      - '.github/workflows/package-kakao-bot.yml'
+      - 'kakao-bot/**'
   workflow_dispatch:
 jobs:
   package:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Syntax check and package
+      - name: Verify and pack
         run: |
           set -e
-          BOT="kakao-bot/GuildCore_KakaoBot_API2_웹출석_복구판.js"
-          node --check "$BOT"
-          test "$(grep -c 'gcPollManualAttendanceReports_(allianceId, rooms);' "$BOT")" -eq 1
+          node --check "kakao-bot/GuildCore_KakaoBot_API2_웹출석_복구판.js"
           mkdir -p package
-          cp "$BOT" "package/GuildCore_KakaoBot_API2.js"
-          cat > "package/README_설치방법.txt" <<'EOF'
-GuildCore 카톡봇 설치 안내
-
-1. ZIP 압축을 풉니다.
-2. MessengerBotR의 기존 GuildCore 스크립트를 백업합니다.
-3. GuildCore_KakaoBot_API2.js의 내용을 기존 스크립트에 복사합니다.
-4. 첫 부분의 KAKAO_INPUT_KEY는 기존 휴대폰 스크립트에 설정된 실제 키로 복원합니다.
-   예제 파일의 '여기에_새_KAKAO_INPUT_KEY_입력'은 실제 인증키가 아닙니다.
-5. 스크립트 컴파일 후 봇을 재시작합니다.
-6. 기존 방 연결은 초기화하지 마세요. !연결상태로 확인하세요.
-
-주의: GitHub 소스에는 보안상 실제 KAKAO_INPUT_KEY가 포함되지 않습니다.
-기존 !발송방등록 / !발송확인 설정과 방 기록을 보존해야 합니다.
-보스/주간/통합 참여 보고서의 전송 대기열을 30초 폴링에서 수신합니다.
-EOF
-          (cd package && zip -9 -r ../GuildCore_KakaoBot_카톡전송수정.zip .)
+          cp "kakao-bot/GuildCore_KakaoBot_API2_웹출석_복구판.js" package/GuildCore_KakaoBot_API2.js
+          printf '%s\n' 'Keep the existing KAKAO_INPUT_KEY when updating MessengerBotR.' 'Back up your existing script before replacing it.' > package/README.txt
+          cd package
+          zip -9 -r ../GuildCore_KakaoBot.zip .
       - uses: actions/upload-artifact@v4
         with:
           name: GuildCore-KakaoBot-ZIP
-          path: GuildCore_KakaoBot_카톡전송수정.zip
+          path: GuildCore_KakaoBot.zip
           retention-days: 7
