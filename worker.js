@@ -417,6 +417,7 @@ async function webLogout(env,token){if(token)await run(env.DB,"DELETE FROM sessi
 
 async function bossView(env,allianceId){
   const bosses=await all(env.DB,"SELECT * FROM bosses WHERE alliance_id=? AND enabled=1 ORDER BY created_at,boss_name",String(allianceId));
+  const pointRules=await gcAllPoints_(env);
   const states=await all(env.DB,"SELECT * FROM boss_state WHERE alliance_id=?",String(allianceId));
   const events=await all(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND attendance_status='open'",String(allianceId));
   const servers=await all(env.DB,"SELECT * FROM alliance_servers WHERE alliance_id=? AND enabled=1",String(allianceId));
@@ -429,7 +430,7 @@ async function bossView(env,allianceId){
     const scope=String(b.boss_scope||"WORLD").toUpperCase()==="SERVER"?"SERVER":"WORLD";
     const next = sched ? sched.toISOString() : (st.next_spawn_at||"");
     const status=b.boss_type==="fixed"?(sched?"매일고정":"시간미설정"):(b.boss_type==="weekly"?(sched?"요일고정":"시간미설정"):(st.status||"미등록"));
-    return {boss_id:b.boss_id,boss_name:b.boss_name,boss_type:b.boss_type,boss_scope:scope,server_id:scope==="SERVER"?String(b.server_id||""):"",server_name:scope==="SERVER"?(svMap[String(b.server_id)]?.server_name||String(b.server_id||"서버")):"월드",respawn_minutes:Number(b.respawn_minutes||0),fixed_times:b.fixed_times||"",last_kill_at:st.last_kill_at?formatKst(st.last_kill_at,false):"",next_spawn_at:next?formatKst(next,false):"",status,notify_enabled:boolVal(b.notify_enabled,true),alert_10m:boolVal(b.alert_10m,true),alert_5m:boolVal(b.alert_5m,true),alert_1m:boolVal(b.alert_1m,true),alert_spawn:boolVal(b.alert_spawn,true),attendance_enabled:boolVal(b.attendance_enabled,true),attendance_open:Boolean(ev),open_event_id:ev?ev.event_id:""};
+    return {boss_id:b.boss_id,boss_name:b.boss_name,participation_points:gcPointAt_(pointRules,"boss",String(b.boss_id),now.toISOString()),boss_type:b.boss_type,boss_scope:scope,server_id:scope==="SERVER"?String(b.server_id||""):"",server_name:scope==="SERVER"?(svMap[String(b.server_id)]?.server_name||String(b.server_id||"서버")):"월드",respawn_minutes:Number(b.respawn_minutes||0),fixed_times:b.fixed_times||"",last_kill_at:st.last_kill_at?formatKst(st.last_kill_at,false):"",next_spawn_at:next?formatKst(next,false):"",status,notify_enabled:boolVal(b.notify_enabled,true),alert_10m:boolVal(b.alert_10m,true),alert_5m:boolVal(b.alert_5m,true),alert_1m:boolVal(b.alert_1m,true),alert_spawn:boolVal(b.alert_spawn,true),attendance_enabled:boolVal(b.attendance_enabled,true),attendance_open:Boolean(ev),open_event_id:ev?ev.event_id:""};
   }).sort((a,b)=>{
     const as=a.boss_scope==="SERVER"?0:1, bs=b.boss_scope==="SERVER"?0:1;
     if(as!==bs)return as-bs;
@@ -725,6 +726,8 @@ async function deleteFundTransaction(env,guildId,txnId,authToken){
 
 async function getGuildStats(env,guildId,startDate,endDate){
   const g=await guildMeta(env,guildId), start=parseLocalDateTime(`${startDate} 00:00`), end=parseLocalDateTime(`${endDate} 23:59`);if(!start||!end)throw new Error("기간 형식이 올바르지 않습니다.");
+  const result=await gcGuildScoreData_(env,g,start.toISOString(),end.toISOString());
+  return {...result,ranking:result.ranking.map(m=>({...m,count:m.boss_count,rate:m.rate}))};
   const events=await all(env.DB,"SELECT * FROM boss_events WHERE alliance_id=? AND event_type<>'manual_participation' AND cut_at>=? AND cut_at<=? AND (boss_scope='WORLD' OR server_id=?)",g.alliance_id,start.toISOString(),end.toISOString(),g.server_id||"");
   if(!events.length)return {total_raids:0,ranking:[]};
   const ids=events.map(x=>x.event_id); const ph=ids.map(()=>"?").join(",");
@@ -1583,6 +1586,96 @@ async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOp
  * Independent from boss attendance; does not change existing attendance data.
  * Week key: Monday in Asia/Seoul. No hard-coded game activities.
  */
+
+/* Weighted attendance: point rule history preserves past boss event scores.
+   Weekly rules take effect for the active week and onward, not past weeks. */
+async function gcPointSchema_(env){
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_participation_point_rules (rule_id TEXT PRIMARY KEY,kind TEXT NOT NULL,owner_id TEXT NOT NULL,points INTEGER NOT NULL,effective_at TEXT NOT NULL,created_at TEXT NOT NULL)");
+  await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_gc_point_rules ON guild_participation_point_rules(kind,owner_id,effective_at)");
+}
+function gcPointValue_(value){
+  const n=Number(value);
+  if(!Number.isInteger(n)||n<0||n>10000)throw new Error("점수는 0~10000 사이의 정수로 입력하세요.");
+  return n;
+}
+function gcPointAt_(rules,kind,owner,date){
+  const t=Date.parse(String(date||""));
+  let last=1,dt=-Infinity;
+  for(const r of rules){
+    if(r.kind!==kind||r.owner_id!==owner)continue;
+    const x=Date.parse(r.effective_at);
+    if(Number.isFinite(x)&&x<=t&&x>dt){last=Number(r.points);dt=x;}
+  }
+  return last;
+}
+async function gcAllPoints_(env){
+  await gcPointSchema_(env);
+  return all(env.DB,"SELECT kind,owner_id,points,effective_at FROM guild_participation_point_rules ORDER BY effective_at");
+}
+async function setBossParticipationPoints(env,allianceId,bossId,points,token){
+  const b=await first(env.DB,"SELECT * FROM bosses WHERE alliance_id=? AND boss_id=? AND enabled=1",String(allianceId),String(bossId));
+  if(!b)throw new Error("보스를 찾을 수 없습니다.");
+  await requireBossConfigScope(env,token,String(allianceId),b.boss_scope||"WORLD",b.server_id||"");
+  const value=gcPointValue_(points),now=nowIso();
+  await gcPointSchema_(env);
+  await run(env.DB,"INSERT INTO guild_participation_point_rules(rule_id,kind,owner_id,points,effective_at,created_at) VALUES(?,?,?,?,?,?)",uid("pt"),"boss",b.boss_id,value,now,now);
+  return {ok:true,points:value,boss_name:b.boss_name};
+}
+async function setWeeklyGuildActivityPoints_(env,guildId,activityId,points,token){
+  const {g}=await gcWeeklyAuth_(env,guildId,token,true);
+  await gcWeeklySchema_(env);
+  const a=await first(env.DB,"SELECT activity_id FROM guild_weekly_activity_types WHERE guild_id=? AND activity_id=? AND active=1",g.guild_id,String(activityId));
+  if(!a)throw new Error("등록된 활동을 찾을 수 없습니다.");
+  const value=gcPointValue_(points),now=nowIso();
+  // Weekly point changes take effect from the current Korean week, so
+  // completed prior weeks keep their historical value.
+  const korea=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
+  const week=gcWeeklyStart_(korea);
+  await gcPointSchema_(env);
+  await run(env.DB,"INSERT INTO guild_participation_point_rules(rule_id,kind,owner_id,points,effective_at,created_at) VALUES(?,?,?,?,?,?)",uid("pt"),"weekly",a.activity_id,value,week+"T00:00:00+09:00",now);
+  return {ok:true,points:value};
+}
+async function gcGuildScoreData_(env,g,startIso,endIso){
+  await gcWeeklySchema_(env);
+  const rules=await gcAllPoints_(env);
+  const members=await all(env.DB,"SELECT member_id,nickname FROM members WHERE guild_id=? AND status='활성' ORDER BY nickname",g.guild_id);
+  const score=new Map(members.map(m=>[String(m.member_id),{member_id:m.member_id,nickname:m.nickname,boss_earned:0,weekly_earned:0,boss_count:0,weekly_count:0,unknown:0}]));
+  const end=new Date(endIso),start=new Date(startIso);
+  if(!Number.isFinite(+start)||!Number.isFinite(+end)||end<start)throw new Error("집계 기간을 확인해주세요.");
+  const bosses=await all(env.DB,"SELECT event_id,boss_id,cut_at FROM boss_events WHERE alliance_id=? AND event_type<>'manual_participation' AND attendance_status='closed' AND cut_at>=? AND cut_at<=? AND (boss_scope='WORLD' OR server_id=?)",g.alliance_id,startIso,endIso,g.server_id||"");
+  let bossTotal=0;
+  for(const e of bosses){bossTotal+=gcPointAt_(rules,"boss",String(e.boss_id),e.cut_at);}
+  if(bosses.length){
+    const ids=bosses.map(e=>e.event_id);
+    const rows=await all(env.DB,"SELECT DISTINCT member_id_at_event AS member_id,event_id FROM boss_attendance WHERE guild_id_at_event=? AND attended=1 AND event_id IN ("+ids.map(()=>"?").join(",")+")",g.guild_id,...ids);
+    const byId=new Map(bosses.map(e=>[e.event_id,e]));
+    for(const r of rows){const m=score.get(String(r.member_id)),e=byId.get(r.event_id);if(m&&e){m.boss_earned+=gcPointAt_(rules,"boss",String(e.boss_id),e.cut_at);m.boss_count++;}}
+  }
+  // Weekly reports belong to their Monday; only completed/held activities count.
+  // A week is included when its Monday lies within the selected KST date range.
+  const kstStart=new Date(start.getTime()+9*3600000).toISOString().slice(0,10);
+  const kstEnd=new Date(end.getTime()+9*3600000).toISOString().slice(0,10);
+  const weeks=await all(env.DB,"SELECT w.activity_id,w.week_start,e.member_id,e.participated FROM guild_weekly_activity_weeks w LEFT JOIN guild_weekly_activity_entries e ON e.guild_id=w.guild_id AND e.activity_id=w.activity_id AND e.week_start=w.week_start WHERE w.guild_id=? AND w.held=1 AND w.week_start>=? AND w.week_start<=?",g.guild_id,kstStart,kstEnd);
+  const unique=new Map();
+  for(const x of weeks){
+    const id=x.activity_id+"|"+x.week_start;
+    if(!unique.has(id))unique.set(id,{activity_id:x.activity_id,week_start:x.week_start,yes:new Set(),known:new Set()});
+    if(x.member_id!=null){unique.get(id).known.add(String(x.member_id));if(Number(x.participated)===1)unique.get(id).yes.add(String(x.member_id));}
+  }
+  let weeklyTotal=0;
+  for(const w of unique.values()){
+    const points=gcPointAt_(rules,"weekly",w.activity_id,w.week_start+"T23:59:59+09:00");
+    weeklyTotal+=points;
+    for(const m of score.values()){
+      if(w.yes.has(String(m.member_id))){m.weekly_earned+=points;m.weekly_count++;}
+      else if(!w.known.has(String(m.member_id)))m.unknown++;
+    }
+  }
+  const total=bossTotal+weeklyTotal;
+  const ranking=[...score.values()].map(m=>({...m,earned_points:m.boss_earned+m.weekly_earned,total_points:total,rate:total?Math.round((m.boss_earned+m.weekly_earned)/total*1000)/10:0})).sort((a,b)=>b.earned_points-a.earned_points||a.nickname.localeCompare(b.nickname,"ko"));
+  return {total_points:total,boss_total_points:bossTotal,weekly_total_points:weeklyTotal,total_raids:bosses.length,weekly_activities:unique.size,ranking};
+}
+
 async function gcWeeklySchema_(env){
   await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_weekly_activity_types (activity_id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,UNIQUE(guild_id,name))");
   await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_weekly_activity_weeks (guild_id TEXT NOT NULL,activity_id TEXT NOT NULL,week_start TEXT NOT NULL,held INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(guild_id,activity_id,week_start))");
@@ -1608,11 +1701,12 @@ async function getWeeklyGuildActivity_(env,guildId,week,token){
   await gcWeeklySchema_(env);
   const monday=gcWeeklyStart_(week);
   const activities=await all(env.DB,"SELECT activity_id,name FROM guild_weekly_activity_types WHERE guild_id=? AND active=1 ORDER BY created_at,activity_id",auth.g.guild_id);
+  const rules=await gcAllPoints_(env);
   const members=await all(env.DB,"SELECT member_id,nickname FROM members WHERE guild_id=? AND status='활성' ORDER BY nickname",auth.g.guild_id);
   const rows=await all(env.DB,"SELECT w.activity_id,w.held,e.member_id,e.participated FROM guild_weekly_activity_weeks w LEFT JOIN guild_weekly_activity_entries e ON e.guild_id=w.guild_id AND e.activity_id=w.activity_id AND e.week_start=w.week_start WHERE w.guild_id=? AND w.week_start=?",auth.g.guild_id,monday);
   const held={},entries={};
   for(const x of rows){held[x.activity_id]=Number(x.held)===1;if(x.member_id!=null)entries[x.activity_id+"|"+x.member_id]=Number(x.participated)===1;}
-  return {week_start:monday,activities,members,held,entries,can_edit:auth.can_edit,guild_name:auth.g.guild_name};
+  return {week_start:monday,activities:activities.map(a=>({...a,points:gcPointAt_(rules,"weekly",a.activity_id,monday+"T23:59:59+09:00")})),members,held,entries,can_edit:auth.can_edit,guild_name:auth.g.guild_name};
 }
 async function addWeeklyGuildActivity_(env,guildId,name,token){
   const {g}=await gcWeeklyAuth_(env,guildId,token,true);
@@ -1720,7 +1814,7 @@ const RPC = {
   saveAllianceNotice, updateAllianceNotice, deleteAllianceNotice, saveGuildNotice, deleteGuildNotice,
   saveGuildMember, deleteGuildMember, resetMemberWebPin, updateGuildMemberRole, updateMemberAllianceRole,
   saveGuildLoot, analyzeGuildLootScreenshot, saveGuildLootScreenshotLocal, importGuildLootScreenshot, markGuildLootSold, deleteGuildLoot, addFundTransaction, deleteFundTransaction, getGuildStats,
-  getWeeklyGuildActivity_, addWeeklyGuildActivity_, archiveWeeklyGuildActivity_, setWeeklyGuildActivityHeld_, setWeeklyGuildActivityMember_, previewWeeklyGuildActivityImport_, importWeeklyGuildActivity_,
+  setBossParticipationPoints, setWeeklyGuildActivityPoints_, getWeeklyGuildActivity_, addWeeklyGuildActivity_, archiveWeeklyGuildActivity_, setWeeklyGuildActivityHeld_, setWeeklyGuildActivityMember_, previewWeeklyGuildActivityImport_, importWeeklyGuildActivity_,
   getAttendanceEvents, getAttendanceRoster, setAttendanceMember, analyzeAttendanceScreenshots, finalizeAttendanceScreenshotBatch, applyAttendanceScreenshotMissing, deleteAttendanceScreenshotChecks, deleteAttendanceEvent,
   saveAllianceBoss, setAllianceBossAttendanceEnabled, disableAllianceBoss, clearAllianceBossState, registerAllianceBossCut, setAllianceBossSpawn, closeBossAttendance
 };
