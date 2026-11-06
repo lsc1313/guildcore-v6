@@ -1578,6 +1578,139 @@ async function queueKakaoAttendanceReport(env,aid,startDay,endDay,token,guildId=
 }
 async function listKakaoAttendanceReports(env,aid,token){await requireAllianceOperate(env,token,aid);await gcAttendanceReportSchema_(env);return await all(env.DB,"SELECT report_id,start_day,end_day,status,created_at,sent_at,error FROM kakao_attendance_reports WHERE alliance_id=? ORDER BY created_at DESC LIMIT 50",aid);}
 
+
+/* ===== Guild-specific weekly activity participation (game-agnostic) =====
+ * Independent from boss attendance; does not change existing attendance data.
+ * Week key: Monday in Asia/Seoul. No hard-coded game activities.
+ */
+async function gcWeeklySchema_(env){
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_weekly_activity_types (activity_id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,UNIQUE(guild_id,name))");
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_weekly_activity_weeks (guild_id TEXT NOT NULL,activity_id TEXT NOT NULL,week_start TEXT NOT NULL,held INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(guild_id,activity_id,week_start))");
+  await run(env.DB,"CREATE TABLE IF NOT EXISTS guild_weekly_activity_entries (guild_id TEXT NOT NULL,activity_id TEXT NOT NULL,week_start TEXT NOT NULL,member_id TEXT NOT NULL,participated INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(guild_id,activity_id,week_start,member_id))");
+}
+function gcWeeklyStart_(value){
+  const v=String(value||"").trim();
+  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(v))throw new Error("주차 날짜가 올바르지 않습니다.");
+  const d=new Date(v+"T00:00:00+09:00");
+  if(Number.isNaN(d.getTime())||new Date(d.getTime()+9*3600000).toISOString().slice(0,10)!==v)throw new Error("존재하지 않는 날짜입니다.");
+  const day=(d.getUTCDay()+6)%7;
+  return new Date(d.getTime()-day*86400000+9*3600000).toISOString().slice(0,10);
+}
+async function gcWeeklyAuth_(env,guildId,token,write){
+  const g=await guildMeta(env,String(guildId));
+  const {ctx,can_edit}=await attendanceContext(env,g.alliance_id,g.guild_id,token);
+  if(write&&!can_edit)throw new Error("길드 운영진 이상만 주간 활동을 수정할 수 있습니다.");
+  return {g,ctx,can_edit};
+}
+function gcWeeklyNorm_(s){return String(s||"").trim().replace(/\\s+/g,"").toLowerCase();}
+async function getWeeklyGuildActivity_(env,guildId,week,token){
+  const auth=await gcWeeklyAuth_(env,guildId,token,false);
+  await gcWeeklySchema_(env);
+  const monday=gcWeeklyStart_(week);
+  const activities=await all(env.DB,"SELECT activity_id,name FROM guild_weekly_activity_types WHERE guild_id=? AND active=1 ORDER BY created_at,activity_id",auth.g.guild_id);
+  const members=await all(env.DB,"SELECT member_id,nickname FROM members WHERE guild_id=? AND status='활성' ORDER BY nickname",auth.g.guild_id);
+  const rows=await all(env.DB,"SELECT w.activity_id,w.held,e.member_id,e.participated FROM guild_weekly_activity_weeks w LEFT JOIN guild_weekly_activity_entries e ON e.guild_id=w.guild_id AND e.activity_id=w.activity_id AND e.week_start=w.week_start WHERE w.guild_id=? AND w.week_start=?",auth.g.guild_id,monday);
+  const held={},entries={};
+  for(const x of rows){held[x.activity_id]=Number(x.held)===1;if(x.member_id!=null)entries[x.activity_id+"|"+x.member_id]=Number(x.participated)===1;}
+  return {week_start:monday,activities,members,held,entries,can_edit:auth.can_edit,guild_name:auth.g.guild_name};
+}
+async function addWeeklyGuildActivity_(env,guildId,name,token){
+  const {g}=await gcWeeklyAuth_(env,guildId,token,true);
+  const n=String(name||"").trim();
+  if(!n||n.length>40||/[\\r\\n\\t|]/.test(n))throw new Error("활동 이름은 1~40자 한 줄로 입력하세요.");
+  await gcWeeklySchema_(env);
+  const types=await all(env.DB,"SELECT * FROM guild_weekly_activity_types WHERE guild_id=? AND active=1",g.guild_id);
+  if(types.length>=12)throw new Error("길드별 활동은 최대 12개까지 설정할 수 있습니다.");
+  const existing=await first(env.DB,"SELECT * FROM guild_weekly_activity_types WHERE guild_id=? AND name=?",g.guild_id,n);
+  if(existing){await run(env.DB,"UPDATE guild_weekly_activity_types SET active=1 WHERE activity_id=?",existing.activity_id);return {ok:true,activity_id:existing.activity_id};}
+  const id=uid("weekly_activity");
+  await run(env.DB,"INSERT INTO guild_weekly_activity_types(activity_id,guild_id,name,active,created_at) VALUES(?,?,?,1,?)",id,g.guild_id,n,nowIso());
+  return {ok:true,activity_id:id};
+}
+async function archiveWeeklyGuildActivity_(env,guildId,activityId,token){
+  const {g}=await gcWeeklyAuth_(env,guildId,token,true);
+  await gcWeeklySchema_(env);
+  const x=await run(env.DB,"UPDATE guild_weekly_activity_types SET active=0 WHERE guild_id=? AND activity_id=? AND active=1",g.guild_id,String(activityId));
+  if(Number(x?.meta?.changes||0)!==1)throw new Error("등록된 활동이 없습니다.");
+  return {ok:true};
+}
+async function setWeeklyGuildActivityHeld_(env,guildId,activityId,week,held,token){
+  const {g}=await gcWeeklyAuth_(env,guildId,token,true);
+  await gcWeeklySchema_(env);
+  const a=await first(env.DB,"SELECT 1 FROM guild_weekly_activity_types WHERE guild_id=? AND activity_id=? AND active=1",g.guild_id,String(activityId));
+  if(!a)throw new Error("등록된 활동이 없습니다.");
+  const monday=gcWeeklyStart_(week);
+  await run(env.DB,"INSERT INTO guild_weekly_activity_weeks(guild_id,activity_id,week_start,held,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(guild_id,activity_id,week_start) DO UPDATE SET held=excluded.held,updated_at=excluded.updated_at",g.guild_id,String(activityId),monday,held?1:0,nowIso());
+  return {ok:true};
+}
+async function setWeeklyGuildActivityMember_(env,guildId,activityId,week,memberId,status,token){
+  const {g}=await gcWeeklyAuth_(env,guildId,token,true);
+  await gcWeeklySchema_(env);
+  const monday=gcWeeklyStart_(week);
+  const a=await first(env.DB,"SELECT 1 FROM guild_weekly_activity_types WHERE guild_id=? AND activity_id=? AND active=1",g.guild_id,String(activityId));
+  const m=await first(env.DB,"SELECT 1 FROM members WHERE guild_id=? AND member_id=? AND status='활성'",g.guild_id,String(memberId));
+  const w=await first(env.DB,"SELECT held FROM guild_weekly_activity_weeks WHERE guild_id=? AND activity_id=? AND week_start=?",g.guild_id,String(activityId),monday);
+  if(!a||!m)throw new Error("활동 또는 길드원을 찾을 수 없습니다.");
+  if(!w||Number(w.held)!==1)throw new Error("먼저 이번 주 활동을 '진행'으로 설정하세요.");
+  if(status===null||status==="unknown"){await run(env.DB,"DELETE FROM guild_weekly_activity_entries WHERE guild_id=? AND activity_id=? AND week_start=? AND member_id=?",g.guild_id,String(activityId),monday,String(memberId));return {ok:true};}
+  if(status!=="yes"&&status!=="no")throw new Error("참여 상태가 올바르지 않습니다.");
+  await run(env.DB,"INSERT INTO guild_weekly_activity_entries(guild_id,activity_id,week_start,member_id,participated,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id,activity_id,week_start,member_id) DO UPDATE SET participated=excluded.participated,updated_at=excluded.updated_at",g.guild_id,String(activityId),monday,String(memberId),status==="yes"?1:0,nowIso());
+  return {ok:true};
+}
+async function gcWeeklyParseReport_(env,guildId,week,raw,token){
+  const data=await getWeeklyGuildActivity_(env,guildId,week,token);
+  if(!data.can_edit)throw new Error("길드 운영진 이상만 주간 자료를 가져올 수 있습니다.");
+  const text=String(raw||"");
+  if(!text||text.length>100000)throw new Error("붙여넣기 자료가 비었거나 너무 깁니다.");
+  const lines=text.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
+  const tabLines=lines.map(line=>line.split("\\t").map(x=>x.trim()));
+  const headIndex=tabLines.findIndex(parts=>parts.length>=2&&/^(문파원|길드원|닉네임|캐릭터|이름)$/i.test(parts[0]));
+  if(headIndex<0)throw new Error("첫 열이 문파원/길드원/닉네임인 탭 구분 표를 붙여넣으세요.");
+  const header=tabLines[headIndex],activityMap={},matchedHeaders=[];
+  for(let i=1;i<header.length;i++){
+    const type=data.activities.find(a=>gcWeeklyNorm_(a.name)===gcWeeklyNorm_(header[i]));
+    if(type){if(activityMap[type.activity_id]!==undefined)throw new Error("같은 활동 열이 중복되었습니다.");activityMap[type.activity_id]=i;matchedHeaders.push(type);}
+  }
+  if(!matchedHeaders.length)throw new Error("등록된 활동 이름과 일치하는 열이 없습니다. 먼저 활동을 설정하세요.");
+  const memberMap=new Map(data.members.map(m=>[gcWeeklyNorm_(m.nickname),m]));
+  const unknown=[],duplicates=[],rows=[],seen=new Set(),badCells=[];
+  for(const parts of tabLines.slice(headIndex+1)){
+    const nickname=String(parts[0]||"").trim();
+    if(!nickname||/^(참여율|합계|전체|총계)$/i.test(nickname))continue;
+    const member=memberMap.get(gcWeeklyNorm_(nickname));
+    if(!member){unknown.push(nickname);continue;}
+    if(seen.has(member.member_id)){duplicates.push(nickname);continue;}
+    seen.add(member.member_id);
+    const statuses={};
+    for(const type of matchedHeaders){
+      const value=String(parts[activityMap[type.activity_id]]||"").trim();
+      if(!data.held[type.activity_id])continue;
+      if(/^(O|○|◯|참여|Y|YES|1|✅|✔|✓)$/i.test(value))statuses[type.activity_id]="yes";
+      else if(/^(X|×|✕|불참|미참여|N|NO|0|❌)$/i.test(value))statuses[type.activity_id]="no";
+      else if(value&&value!=="-"&&value!=="—")badCells.push(nickname+" / "+type.name+": "+value);
+    }
+    rows.push({member_id:member.member_id,nickname,statuses});
+  }
+  const count=rows.reduce((n,r)=>n+Object.keys(r.statuses).length,0);
+  return {week_start:data.week_start,activity_columns:matchedHeaders.map(a=>({activity_id:a.activity_id,name:a.name,held:!!data.held[a.activity_id]})),matched_members:rows.length,total_cells:count,unknown_names:unknown,duplicate_names:duplicates,invalid_cells:badCells,rows};
+}
+async function previewWeeklyGuildActivityImport_(env,guildId,week,text,token){
+  const p=await gcWeeklyParseReport_(env,guildId,week,text,token);
+  return {week_start:p.week_start,activity_columns:p.activity_columns,matched_members:p.matched_members,total_cells:p.total_cells,unknown_names:p.unknown_names,duplicate_names:p.duplicate_names,invalid_cells:p.invalid_cells};
+}
+async function importWeeklyGuildActivity_(env,guildId,week,text,token){
+  const p=await gcWeeklyParseReport_(env,guildId,week,text,token);
+  if(p.unknown_names.length||p.duplicate_names.length||p.invalid_cells.length)throw new Error("미등록/중복 닉네임 또는 해석 불가 셀이 있습니다. 미리보기에서 확인한 뒤 수정하세요.");
+  if(!p.total_cells)throw new Error("진행 완료로 표시된 활동의 O/X 기록이 없습니다.");
+  const now=nowIso();
+  const ops=[];
+  for(const row of p.rows)for(const [activityId,status] of Object.entries(row.statuses)){
+    ops.push(env.DB.prepare("INSERT INTO guild_weekly_activity_entries(guild_id,activity_id,week_start,member_id,participated,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id,activity_id,week_start,member_id) DO UPDATE SET participated=excluded.participated,updated_at=excluded.updated_at").bind(String(guildId),activityId,p.week_start,row.member_id,status==="yes"?1:0,now));
+  }
+  for(let i=0;i<ops.length;i+=75)await env.DB.batch(ops.slice(i,i+75));
+  return {ok:true,week_start:p.week_start,matched_members:p.matched_members,updated_cells:p.total_cells};
+}
+
 const RPC = {
   webAttendanceInfo, webAttendanceToggle,
   webLogin, webWhoAmI, webLogout, issueAllianceLeaderBootstrapPin,
@@ -1587,6 +1720,7 @@ const RPC = {
   saveAllianceNotice, updateAllianceNotice, deleteAllianceNotice, saveGuildNotice, deleteGuildNotice,
   saveGuildMember, deleteGuildMember, resetMemberWebPin, updateGuildMemberRole, updateMemberAllianceRole,
   saveGuildLoot, analyzeGuildLootScreenshot, saveGuildLootScreenshotLocal, importGuildLootScreenshot, markGuildLootSold, deleteGuildLoot, addFundTransaction, deleteFundTransaction, getGuildStats,
+  getWeeklyGuildActivity_, addWeeklyGuildActivity_, archiveWeeklyGuildActivity_, setWeeklyGuildActivityHeld_, setWeeklyGuildActivityMember_, previewWeeklyGuildActivityImport_, importWeeklyGuildActivity_,
   getAttendanceEvents, getAttendanceRoster, setAttendanceMember, analyzeAttendanceScreenshots, finalizeAttendanceScreenshotBatch, applyAttendanceScreenshotMissing, deleteAttendanceScreenshotChecks, deleteAttendanceEvent,
   saveAllianceBoss, setAllianceBossAttendanceEnabled, disableAllianceBoss, clearAllianceBossState, registerAllianceBossCut, setAllianceBossSpawn, closeBossAttendance
 };
