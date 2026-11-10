@@ -29,6 +29,11 @@ var KAKAO_ALERT_LAST_ERROR_ = "없음";
 var KAKAO_ALERT_LAST_COUNT_ = 0;
 var KAKAO_ALERT_TIMER_GENERATION_ = 0;
 var KAKAO_ALERT_POLLING_ = false;
+var GC_POLL_LAST_FINISHED_MS_ = 0;
+var GC_POLL_LAST_STARTED_MS_ = 0;
+var GC_POLL_RESTART_BACKOFF_MS_ = 15000;
+var GC_POLL_LAST_RESTART_MS_ = 0;
+var GC_POLL_REPORT_LAST_COUNT_ = 0;
 var KAKAO_ALERT_SENT_COUNT_ = 0;
 var KAKAO_ALERT_SKIPPED_COUNT_ = 0;
 var KAKAO_ALERT_UNCERTAIN_COUNT_ = 0;
@@ -603,6 +608,7 @@ function gcPollManualAttendanceReports_(allianceId, rooms) {
     });
     if (!response || response.ok !== true) throw new Error(response && response.error || "attendance_reports_pull 실패");
     var reports = response.data && response.data.reports || [];
+    GC_POLL_REPORT_LAST_COUNT_ += reports.length;
     for (var j = 0; j < reports.length; j++) {
       var report = reports[j] || {}, id = String(report.report_id || "");
       if (!id || String(report.status || "") !== "queued") continue;
@@ -637,6 +643,8 @@ function pollKakaoAlerts_() {
   KAKAO_ALERT_LAST_POLL_ = String(new Date());
   KAKAO_ALERT_LAST_ERROR_ = "없음";
   KAKAO_ALERT_LAST_COUNT_ = 0;
+  GC_POLL_REPORT_LAST_COUNT_ = 0;
+  GC_POLL_LAST_STARTED_MS_ = Date.now();
   gcCleanupRoomBindings_(false);
   var entries = activeRoomEntries_();
   if (!entries.length) {
@@ -657,6 +665,16 @@ function pollKakaoAlerts_() {
       if (!Object.prototype.hasOwnProperty.call(groups, allianceId)) continue;
       var rooms = uniqueRoomEntries_(groups[allianceId]);
       // 실제 발송 세션이 확인되지 않은 방은 ACK 성공으로 처리하지 않는다.
+
+      // Always drain manual participation reports first: pending alert API errors
+      // must not starve boss/weekly/combined Kakao reports.
+      /* 0) 수동 참여 보고서: 길드방/연합방별로 정확하게 수신 */
+      try {
+        gcPollManualAttendanceReports_(allianceId, rooms);
+      } catch (eReport) {
+        KAKAO_ALERT_LAST_ERROR_ = "참여 보고서 전송 오류: " + String(eReport);
+        try { Log.e("GuildCore Kakao manual report poll: " + eReport); } catch (_) {}
+      }
 
       /* 1) 보스 10/5분 알림: 방별 성공 기록, 실패 시 queued 재시도 */
       try {
@@ -763,16 +781,10 @@ function pollKakaoAlerts_() {
         KAKAO_ALERT_LAST_ERROR_ = String(eResult);
         try { Log.e("GuildCore Kakao attendance result poll: " + eResult); } catch (_) {}
       }
-      /* 3) 수동 참여 보고서: 길드방/연합방별로 정확하게 수신 */
-      try {
-        gcPollManualAttendanceReports_(allianceId, rooms);
-      } catch (eReport) {
-        KAKAO_ALERT_LAST_ERROR_ = "참여 보고서 전송 오류: " + String(eReport);
-        try { Log.e("GuildCore Kakao manual report poll: " + eReport); } catch (_) {}
-      }
     }
   } finally {
     KAKAO_ALERT_POLLING_ = false;
+    GC_POLL_LAST_FINISHED_MS_ = Date.now();
   }
 }
 function startKakaoAlertPoller_() {
@@ -791,14 +803,15 @@ function startKakaoAlertPoller_() {
       run: function() {
         while (generation === KAKAO_ALERT_TIMER_GENERATION_ &&
                String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) === KAKAO_TIMER_OWNER_) {
-          try { java.lang.Thread.sleep(KAKAO_ALERT_POLL_MS_); } catch (eSleep) { break; }
-          if (generation !== KAKAO_ALERT_TIMER_GENERATION_ ||
-              String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) !== KAKAO_TIMER_OWNER_) break;
+          // Recover any queued reports immediately when MessengerBotR starts.
           try { pollKakaoAlerts_(); }
           catch (ePoll) {
             KAKAO_ALERT_LAST_ERROR_ = String(ePoll);
             try { Log.e("GuildCore Kakao alert poll: " + ePoll); } catch (_) {}
           }
+          try { java.lang.Thread.sleep(KAKAO_ALERT_POLL_MS_); } catch (eSleep) { break; }
+          if (generation !== KAKAO_ALERT_TIMER_GENERATION_ ||
+              String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) !== KAKAO_TIMER_OWNER_) break;
         }
       }
     });
@@ -821,6 +834,25 @@ function startKakaoAlertPoller_() {
     }
   } catch (e) { KAKAO_ALERT_LAST_ERROR_ = "JS 타이머: " + String(e); }
   KAKAO_ALERT_TIMER_MODE_ = "실행 실패";
+}
+
+
+/* Recover a dead poller on the next Kakao notification. This cannot restart
+ * a process that Android has force-stopped; it repairs a live-but-stalled bot.
+ */
+function gcEnsureKakaoPoller_() {
+  var now = Date.now();
+  if (now - GC_POLL_LAST_RESTART_MS_ < GC_POLL_RESTART_BACKOFF_MS_) return;
+  var owned = false, alive = false;
+  try {
+    owned = String(java.lang.System.getProperty(KAKAO_TIMER_OWNER_KEY_, "")) === KAKAO_TIMER_OWNER_;
+    alive = !!(KAKAO_ALERT_THREAD_ && KAKAO_ALERT_THREAD_.isAlive());
+  } catch (e) { alive = false; }
+  if (owned && alive) return;
+  if (KAKAO_ALERT_INTERVAL_ !== null && KAKAO_ALERT_TIMER_MODE_ === "JavaScript 타이머" && owned) return;
+  GC_POLL_LAST_RESTART_MS_ = now;
+  try { startKakaoAlertPoller_(); }
+  catch (e) { KAKAO_ALERT_LAST_ERROR_ = "자동 폴링 복구 실패: " + String(e); }
 }
 
 function onStartCompile() {
@@ -899,6 +931,7 @@ function response(
     if (packageName && String(packageName) !== "com.kakao.talk") return;
     gcCleanupRoomBindings_(false);
     gcTouchRoom_(room, channelId);
+    gcEnsureKakaoPoller_();
     if (text.indexOf("!") !== 0) return;
     if (/^!(참여|취소)(?:\s|$)/.test(text)) { replier.reply("출석은 !컷 후 생성되는 웹 출석 링크에서 진행해주세요."); return; }
     if (!string_(channelId).trim()) { replier.reply("❌ API2 방 ID를 읽지 못했습니다. 연결하지 않습니다."); return; }
