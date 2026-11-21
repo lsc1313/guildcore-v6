@@ -1546,9 +1546,9 @@ async function gcPullKakaoAttendanceReports_(env,aid,p={}){
     const rows=await all(env.DB,"SELECT report_id,message,status,target_guild_id FROM kakao_attendance_reports WHERE alliance_id=? AND status='queued' AND target_guild_id='' ORDER BY created_at LIMIT 10",aid);
     return {reports:rows};
   }
-  const table=await first(env.DB,"SELECT name FROM sqlite_master WHERE type='table' AND name='kakao_room_bindings_v2'");
-  if(!table)return {reports:[]};
-  const binding=await first(env.DB,"SELECT room_type,guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND active=1 LIMIT 1",aid,roomId);
+  let binding;
+  try{binding=await first(env.DB,"SELECT room_type,guild_id FROM kakao_room_bindings_v2 WHERE alliance_id=? AND room_id=? AND active=1 LIMIT 1",aid,roomId);}
+  catch(e){if(/no such table:\s*(?:main\.)?kakao_room_bindings_v2\b/i.test(String(e?.message||e)))return {reports:[]};throw e;}
   if(!binding)return {reports:[]};
   const type=String(binding.room_type||"");
   if(type==="alliance"){
@@ -2383,8 +2383,17 @@ async function gcKakaoAssertRoomReceipts_(env,aid,type,ids,roomIds){
     if(rooms.some(room=>!sent.has(room)))throw new Error("Kakao room delivery confirmation incomplete");
   }
 }
+let gcKakaoQueueSchemaReady_;
 async function gcKakaoLeaseSchema_(env){
-  await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
+  if(!gcKakaoQueueSchemaReady_){
+    gcKakaoQueueSchemaReady_=(async()=>{
+      await run(env.DB,"CREATE TABLE IF NOT EXISTS kakao_delivery_lease (alliance_id TEXT NOT NULL, queue_type TEXT NOT NULL, item_id TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY(alliance_id,queue_type,item_id))");
+      await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_gc_boss_kakao_poll ON boss_alert_queue(alliance_id,kakao_status,due_at,created_at)");
+      await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_gc_boss_discord_poll ON boss_alert_queue(alliance_id,discord_status,due_at,created_at)");
+      await run(env.DB,"CREATE INDEX IF NOT EXISTS idx_gc_kakao_lease_expiry ON kakao_delivery_lease(alliance_id,queue_type,claimed_at)");
+    })().catch(e=>{gcKakaoQueueSchemaReady_=undefined;throw e;});
+  }
+  await gcKakaoQueueSchemaReady_;
 }
 async function gcKakaoRecoverLeases_(env,aid,table,type,id){
   await gcKakaoLeaseSchema_(env);
@@ -2392,7 +2401,7 @@ async function gcKakaoRecoverLeases_(env,aid,table,type,id){
   await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?)`,aid,aid,type,cutoff);
   await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND claimed_at<?`,aid,type,cutoff);
   // Remove orphan leases from already acknowledged or expired queue items.
-  await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND item_id IN (SELECT ${id} FROM ${table} WHERE alliance_id=? AND kakao_status IN ('sent','expired'))`,aid,type,aid);
+  await run(env.DB,`DELETE FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=? AND EXISTS (SELECT 1 FROM ${table} q WHERE q.${id}=kakao_delivery_lease.item_id AND q.alliance_id=kakao_delivery_lease.alliance_id AND q.kakao_status IN ('sent','expired'))`,aid,type);
   // Recover legacy in-flight rows that predate the lease table after a safe delay.
   await run(env.DB,`UPDATE ${table} SET kakao_status='queued' WHERE alliance_id=? AND kakao_status='sending' AND ${id} NOT IN (SELECT item_id FROM kakao_delivery_lease WHERE alliance_id=? AND queue_type=?) AND ${type==="alert"?"due_at":"created_at"}<?`,aid,aid,type,new Date(Date.now()-120000).toISOString());
 }
@@ -2416,6 +2425,7 @@ async function botPullAlerts_(env,aid,p){
   // The client retains per-room delivery receipts and suppresses repeat sends.
   // Kakao reads are non-destructive: client confirms delivery after each room has been processed.
   // No 'sending' lease can become permanently stranded after a device/network interruption.
+  await gcKakaoLeaseSchema_(env);
   if(target==="kakao")await gcKakaoRecoverLeases_(env,aid,"boss_alert_queue","alert","alert_id");
   const rows=await all(env.DB,`SELECT * FROM boss_alert_queue WHERE alliance_id=? AND ${key}='queued' ORDER BY due_at,created_at LIMIT 200`,aid),live=[];
   const seen=new Set();
